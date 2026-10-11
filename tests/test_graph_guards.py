@@ -116,6 +116,24 @@ def test_ungrounded_number_dropped(ds):
     assert not v.ok and it2.capacity_changes == []      # 40 was invented -> dropped -> clarify
 
 
+@pytest.mark.parametrize("text,intent,answer_type,cut", [
+    # the 3 failing phrasings from eval/report.md (alloc-04, trade-03, trade-04)
+    ("Allocate the orders with carbon weighted heavily", "allocate", AnswerType.ALLOCATION, None),
+    ("How much more would a 20% CO2 reduction cost us?", "tradeoff", AnswerType.SCENARIO, 20.0),
+    ("What is the cost of cutting emissions by 5%?", "tradeoff", AnswerType.SCENARIO, 5.0),
+    # regressions: capacity loss still re-plans after carbon moved first
+    ("Plant B loses 30% capacity. Re-plan.", "replan", AnswerType.SCENARIO, None),
+    ("Plant A capacity reduced by 20%", "replan", AnswerType.SCENARIO, None),
+    ("Plant B loses 30%, what happens to carbon?", "replan", AnswerType.SCENARIO, None),
+    ("Plant A: what would a 20% CO2 reduction cost?", "tradeoff", AnswerType.SCENARIO, 20.0),  # no loss word
+])
+def test_rules_route_eval_phrasings(ds, text, intent, answer_type, cut):
+    p = rules_parse(text)
+    assert p.intent.value == intent and p.carbon_cut_pct == cut
+    resp, _ = ask(ds, text, weights={"cost": 0.3, "carbon": 0.7})
+    assert resp.answer_type == answer_type
+
+
 def _biased_llm_deps() -> tuple[Deps, list]:
     """Router that copies the 'cheapest plan that is on time' example into every request, as qwen2.5:7b did."""
     from shared.models import Intent, ParsedIntent

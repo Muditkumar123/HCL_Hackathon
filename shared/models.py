@@ -318,6 +318,7 @@ class HealthResponse(BaseModel):
     data_store: str                         # "ok" | "empty" | "error: ..."
     llm: str                                # "ok:<provider>/<model>" | "mock" | "error: ..."
     tables: dict[str, int] = Field(default_factory=dict)  # row counts
+    validation_passed: bool | None = None   # all backend.validate_data checks passed; None = not run
 
 
 class TraceStep(BaseModel):

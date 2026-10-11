@@ -22,13 +22,23 @@ def rules_parse(request: str) -> ParsedIntent:
                             reason="rules: manager override", parsed_by="rules")
     if re.search(r"\b(why|explain|reason)\b", t) and order:
         return ParsedIntent(intent=Intent.EXPLAIN, order_id=order.group(1), reason="rules: why + order", parsed_by="rules")
+    # a named plant + a capacity-loss word + a % is a re-plan even if carbon is mentioned
+    # ("Plant B loses 30%, what happens to carbon?")
+    if plant and pct and re.search(r"\b(?:los[et]s?|lost|down|outage)\b|\bcapacity\s+(?:is\s+|was\s+)?reduc\w*", t):
+        return ParsedIntent(intent=Intent.REPLAN, reason="rules: capacity loss", parsed_by="rules",
+                            capacity_changes=[CapacityChange(plant=plant.group(1).upper(),
+                                                             capacity_loss_pct=float(pct.group(1)))])
+    # otherwise carbon before capacity loss: "20% CO2 reduction" is a trade-off, not a plant losing capacity
+    if re.search(r"\b(carbon|low[- ]carbon|co2(?: reduction)?|emissions?|greener|trade-?off)\b", t):
+        if re.search(r"\ballocat\w*", t) and not pct:   # "allocate with carbon weighted heavily": a preference
+            return ParsedIntent(intent=Intent.ALLOCATE, reason="rules: allocation with carbon preference",
+                                parsed_by="rules")
+        return ParsedIntent(intent=Intent.TRADEOFF, carbon_cut_pct=float(pct.group(1)) if pct else None,
+                            reason="rules: carbon trade-off", parsed_by="rules")
     if re.search(r"\b(los[et]s?|down|outage|reduc\w*|re-?plan)\b", t):
         changes = ([CapacityChange(plant=plant.group(1).upper(), capacity_loss_pct=float(pct.group(1)))]
                    if plant and pct else [])
         return ParsedIntent(intent=Intent.REPLAN, capacity_changes=changes, reason="rules: capacity loss", parsed_by="rules")
-    if re.search(r"\b(carbon|co2|emission|greener|trade-?off)\b", t):
-        return ParsedIntent(intent=Intent.TRADEOFF, carbon_cut_pct=float(pct.group(1)) if pct else None,
-                            reason="rules: carbon trade-off", parsed_by="rules")
     if re.search(r"\b(brief|leadership|management|summary report)\b", t):
         return ParsedIntent(intent=Intent.BRIEF, reason="rules: brief", parsed_by="rules")
     if re.search(r"\b(allocat\w*|plan|assign|cheapest|schedule)\b", t):

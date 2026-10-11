@@ -6,7 +6,7 @@ Design doc: ask Mudit for the link. Task files: `.coordination/tasks/`.
 ## Ownership (write ONLY in your own folders)
 | Person | Writes to |
 |---|---|
-| Mudit (Orchestrator) | `ai/graph.py`, `ai/llm.py`, `ai/generation/`, `frontend/`, `shared/`, `tests/test_graph_guards.py`, `CLAUDE.md`, `.coordination/tasks/` |
+| Mudit (Orchestrator) | `ai/graph.py`, `ai/llm.py`, `ai/generation/`, `frontend/`, `shared/`, `tests/test_graph_guards.py`, `CLAUDE.md`, `DECISIONS.md`, `.coordination/tasks/` |
 | Ayush (Worker 1) | `ai/tools/`, `tests/tools/`, `.coordination/status/worker1.md` |
 | Shivang (Worker 2) | `backend/`, `scripts/`, `eval/`, `data/DATA_CARD.md`, `Dockerfile`, `docker-compose.yml`, `requirements.txt`, `.env.example`, `tests/backend/`, `.coordination/status/worker2.md` |
 
