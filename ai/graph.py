@@ -26,6 +26,7 @@ is deterministic, so letting an LLM choose tools would add failure modes and cos
 
 from __future__ import annotations
 
+import inspect
 import logging
 import operator
 import os
@@ -58,7 +59,7 @@ class Deps:
     counterfactual: Callable[..., CounterfactualResult]
     parse_intent: Callable[[str], tuple[ParsedIntent, int, bool]] = router.parse_intent
     write: Callable[..., tuple[str | None, int]] = writer.write
-    base_plan: Callable[[], SolveResult | None] = lambda: None   # backend.store.latest_plan
+    base_plan: Callable[..., SolveResult | None] = lambda weights=None: None   # backend.store.latest_plan(weights)
     _graph: Any = field(default=None, init=False, repr=False, compare=False)
 
     def graph(self) -> Any:
@@ -150,6 +151,16 @@ def tonnes(kg: float) -> str:
 
 def pct(x: float) -> str:
     return f"{x * 100:.0f}%"
+
+
+def _base_plan(deps: Deps, w: Weights) -> SolveResult | None:
+    """Latest saved plan solved with these weights (backend.store.latest_plan filters by them), so 'why' and
+    re-plan never diff against a plan solved for other weights. Zero-argument callables (older tests) still work."""
+    try:
+        takes_weights = bool(inspect.signature(deps.base_plan).parameters)
+    except (TypeError, ValueError):
+        takes_weights = True
+    return deps.base_plan(w) if takes_weights else deps.base_plan()
 
 
 def _late_ids(res: SolveResult) -> list[str]:
@@ -266,7 +277,7 @@ def build_graph(deps: Deps):
 
     def replan(s: State) -> dict:
         t0, ds, w, ch = time.perf_counter(), s["ds"], s["weights"], s["intent"].capacity_changes
-        base = deps.base_plan() or deps.solve(ds, w)
+        base = _base_plan(deps, w) or deps.solve(ds, w)
         new = deps.solve(ds, w, changes=ch, base_plan=base.assignments)
         changes = deps.compare(ds, base, new)
         return {"base": base, "result": new, "changes": changes, "answer_type": AnswerType.SCENARIO,
@@ -277,7 +288,7 @@ def build_graph(deps: Deps):
 
     def explain(s: State) -> dict:
         t0, ds, w, oid = time.perf_counter(), s["ds"], s["weights"], s["intent"].order_id
-        base = deps.base_plan() or deps.solve(ds, w)
+        base = _base_plan(deps, w) or deps.solve(ds, w)
         chosen = _order_plant(base, oid)
         cfs = [deps.counterfactual(ds, base, oid, p) for p in _eligible_plants(ds, oid) if p != chosen]
         return {"result": base, "counterfactuals": cfs, "answer_type": AnswerType.SCENARIO, "mode": "summary",

@@ -833,3 +833,28 @@ def test_g1_trace_notes_defence_in_depth(ds):
     _, trace = ask(ds, "Allocate this week's orders")
     check = next(s.check for s in trace.steps if s.tool == "input_guard")
     assert "defence in depth" in check and "G2" in check and "solver" in check
+
+
+# ---------------- base plan must be solved with the same weights (eval explain-001)
+def test_base_plan_requested_with_resolved_weights(ds):
+    seen: list = []
+    deps = make_deps()
+    deps.base_plan = lambda weights=None: seen.append(weights) or None
+    ask(ds, "Why was order 77 built in Plant C?", deps, weights={"cost": 0.2, "carbon": 0.8})
+    ask(ds, "Plant A loses 30% capacity. Re-plan.", deps)
+    assert [(w.cost, w.carbon) for w in seen] == [(0.2, 0.8), (0.7, 0.3)]
+
+
+def test_base_plan_with_other_weights_not_reused(ds):
+    saved_cost_only = _plan("A", 17400)              # an earlier plan solved for cost only (total 18,300)
+    deps = make_deps()                               # like latest_plan(): no weights -> newest plan, any weights
+    deps.base_plan = lambda weights=None: saved_cost_only if weights is None or weights.cost == 1.0 else None
+    resp, _ = ask(ds, "Why was order O-077 assigned to its plant?", deps)   # explain-001 wording, default weights
+    assert resp.kpis.total_cost == 19100             # fresh base for 70/30, not the cost-only plan
+
+
+def test_zero_argument_base_plan_still_supported(ds):
+    deps = make_deps()
+    deps.base_plan = lambda: None                    # tests/tools/test_scenarios.py uses this form
+    resp, _ = ask(ds, "Why was order 77 built in Plant C?", deps)
+    assert resp.answer_type == AnswerType.SCENARIO
