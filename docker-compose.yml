@@ -1,0 +1,28 @@
+# Ollama runs on the host and listens on 127.0.0.1 only, so both services use the host network
+# (api on :8000, ui on :8501) and reach Ollama at http://localhost:11434.
+services:
+  api:
+    build: .
+    network_mode: host
+    env_file: .env
+    environment:
+      OLLAMA_BASE_URL: http://localhost:11434
+    volumes:
+      - appdata:/app/data
+    restart: unless-stopped
+
+  ui:
+    build: .
+    network_mode: host
+    env_file: .env
+    environment:
+      API_URL: http://localhost:8000
+      SKIP_DATA_LOAD: "true"
+    command: ["streamlit", "run", "frontend/app.py", "--server.port", "8501", "--server.address", "0.0.0.0",
+              "--server.headless", "true"]
+    depends_on:
+      - api
+    restart: unless-stopped
+
+volumes:
+  appdata:

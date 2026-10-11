@@ -1,0 +1,19 @@
+# Pinned for Python 3.11 (Docker). Dev uses conda env crypto_env (Python 3.10) with the same versions.
+fastapi==0.138.0
+uvicorn==0.49.0
+python-multipart==0.0.32
+pydantic==2.13.4
+pandas==2.3.3
+numpy==2.2.6
+ortools==9.15.6755
+langgraph==1.2.7
+langchain==1.3.11
+langchain-core==1.4.8
+langchain-ollama==1.1.0
+streamlit==1.65.0
+plotly==6.7.0
+httpx==0.28.1
+python-dotenv==1.2.2
+PyYAML==6.0.3
+pytest==9.0.3
+ruff==0.15.13
