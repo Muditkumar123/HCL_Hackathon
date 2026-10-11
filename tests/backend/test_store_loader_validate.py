@@ -68,6 +68,15 @@ def test_latest_plan_ignores_plans_from_older_data(loaded):
     assert loaded.latest_plan().assignments[0].plant == "B"
 
 
+def test_latest_plan_filters_by_weights(loaded):
+    loaded.save_plan("al-default", _plan("A"))                                   # default 0.7/0.3/1.0
+    cost_only = _plan("B").model_copy(update={"weights_used": Weights(cost=1, carbon=0, lateness=0)})
+    loaded.save_plan("al-cost", cost_only)
+    assert loaded.latest_plan().assignments[0].plant == "B"                      # no filter: newest
+    assert loaded.latest_plan(Weights()).assignments[0].plant == "A"            # same weights only
+    assert loaded.latest_plan(Weights(cost=0.5, carbon=0.5)) is None            # nothing saved for these
+
+
 def test_init_db_migrates_old_plans_table(tmp_path: Path):
     import sqlite3
 

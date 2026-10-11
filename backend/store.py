@@ -18,7 +18,7 @@ from typing import Iterator, Literal, get_args
 
 import pandas as pd
 
-from shared.models import REQUIRED_COLUMNS, Dataset, SolveResult, TableName, TraceRecord, utcnow
+from shared.models import REQUIRED_COLUMNS, Dataset, SolveResult, TableName, TraceRecord, Weights, utcnow
 
 log = logging.getLogger(__name__)
 
@@ -62,10 +62,11 @@ def init_db(path: str | None = None) -> None:
         conn.execute("CREATE TABLE IF NOT EXISTS traces (run_id TEXT PRIMARY KEY, json TEXT NOT NULL, "
                      "created_at TEXT NOT NULL)")
         conn.execute("CREATE TABLE IF NOT EXISTS plans (run_id TEXT PRIMARY KEY, json TEXT NOT NULL, "
-                     "created_at TEXT NOT NULL, data_version TEXT)")
+                     "created_at TEXT NOT NULL, data_version TEXT, weights TEXT)")
         cols = {r[1] for r in conn.execute("PRAGMA table_info(plans)")}
-        if "data_version" not in cols:  # DB created before plans were tied to a data version
-            conn.execute("ALTER TABLE plans ADD COLUMN data_version TEXT")
+        for col in ("data_version", "weights"):  # DBs created before plans were keyed by data and weights
+            if col not in cols:
+                conn.execute(f"ALTER TABLE plans ADD COLUMN {col} TEXT")
     _invalidate()
     log.info("db ready at %s", db_path())
 
@@ -178,26 +179,36 @@ def list_traces(limit: int = 1000) -> list[TraceRecord]:
     return [TraceRecord.model_validate_json(r[0]) for r in rows]
 
 
+def weights_key(w: Weights) -> str:
+    """Canonical text for a (normalised) Weights, so equal weights compare equal in SQL."""
+    return f"{w.cost:.4f}/{w.carbon:.4f}/{w.lateness:.4f}"
+
+
 def save_plan(run_id: str, result: SolveResult, data_version: str | None = None) -> None:
     """Store a plan so later re-plans diff against it. `data_version` is the dataset the plan was solved on
-    (default: the current one); `latest_plan` only returns plans for the current data."""
+    (default: the current one); `latest_plan` only returns plans for the current data (and weights, if given)."""
     version = data_version or load_dataset().data_version
     with _connect() as conn:
-        conn.execute("INSERT OR REPLACE INTO plans (run_id, json, created_at, data_version) VALUES (?, ?, ?, ?)",
-                     (run_id, result.model_dump_json(), utcnow().isoformat(), version))
+        conn.execute("INSERT OR REPLACE INTO plans (run_id, json, created_at, data_version, weights) "
+                     "VALUES (?, ?, ?, ?, ?)",
+                     (run_id, result.model_dump_json(), utcnow().isoformat(), version,
+                      weights_key(result.weights_used)))
 
 
-def latest_plan() -> SolveResult | None:
+def latest_plan(weights: Weights | None = None) -> SolveResult | None:
     """Newest saved plan for the CURRENT data, else None (the graph then solves a fresh base).
 
     A plan solved before an /ingest refers to orders, capacities or costs that may no longer exist, so "why" and
-    re-plan answers must never diff against it.
+    re-plan answers must never diff against it. Pass `weights` to also require the same objective weights:
+    a counterfactual re-solved with default weights must not be compared with a plan solved for cost only.
     """
     try:
         version = load_dataset().data_version
+        sql, args = "SELECT json FROM plans WHERE data_version = ?", [version]
+        if weights is not None:
+            sql, args = sql + " AND weights = ?", args + [weights_key(weights)]
         with _connect() as conn:
-            row = conn.execute("SELECT json FROM plans WHERE data_version = ? ORDER BY created_at DESC LIMIT 1",
-                               (version,)).fetchone()
+            row = conn.execute(sql + " ORDER BY created_at DESC LIMIT 1", args).fetchone()
     except sqlite3.Error as exc:  # no DB yet => no base plan
         log.warning("latest_plan unavailable: %s", exc)
         return None
