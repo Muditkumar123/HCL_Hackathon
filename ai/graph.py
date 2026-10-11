@@ -188,7 +188,7 @@ def build_graph(deps: Deps):
     # ---------------- G2
     def intent_guard(s: State) -> dict:
         t0 = time.perf_counter()
-        v, intent = guards.intent_guard(s["intent"], s["cleaned"], s["ds"], s["req"].scenario)
+        v, intent = guards.intent_guard(s["intent"], s["cleaned"], s["ds"], s["req"].scenario, s["req"].weights)
         # explicit API weights beat parsed text, like the API scenario (D-005). The UI omits weights at the
         # 70/30 default, so a grounded "cheapest"/"greenest" in the request still applies there.
         weights = s["req"].weights or intent.weights_override or Weights()

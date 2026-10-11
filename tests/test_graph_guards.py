@@ -630,3 +630,98 @@ def test_g4_claim_roots_match_word_forms():
     assert _g4("Moving this order to Plant C would increase the cost by 116, but re-solving the whole plan "
                "changes total cost by +1,187.", facts)
     assert not _g4("Plant C would be cheaper for this order.", facts)
+
+
+# ---------------- D-005 / eval weights-002, weights-003: explicit API weights win with the LLM on
+@pytest.mark.parametrize("text,api", [
+    ("Give me the cheapest plan", {"cost": 0.2, "carbon": 0.8}),
+    ("Allocate all open orders under the supplied objective weights.", {"cost": 0.0, "carbon": 1.0, "lateness": 1.0}),
+    ("Allocate all open orders under the supplied objective weights.", {"cost": 1.0, "carbon": 0.0, "lateness": 0.0}),
+])
+def test_api_weights_win_over_llm_override(ds, text, api):
+    deps, calls = _biased_llm_deps()                      # LLM returns weights_override cost=1 carbon=0
+    resp, _ = ask(ds, text, deps, weights=api)
+    want = Weights(**api)
+    assert (calls[0][0].cost, calls[0][0].carbon, calls[0][0].lateness) == (want.cost, want.carbon, want.lateness)
+    assert (resp.weights_used.cost, resp.weights_used.carbon) == (want.cost, want.carbon)
+
+
+# ---------------- cheapest plan that is on time: flags set in code, not left to the LLM
+def _late_plan_deps(parsed: "_PI") -> tuple[Deps, dict]:
+    deps, rec = _llm_deps(parsed)
+    deps.solve = lambda ds, w, **kw: rec["solve"].append((w, kw)) or _plan(late=1)
+    return deps, rec
+
+
+@pytest.mark.parametrize("parsed", [
+    _PI(intent=_Intent.ALLOCATE, weights_override=Weights(cost=1, carbon=0)),   # what qwen2.5 returned
+    _PI(intent=_Intent.ALLOCATE),                                               # LLM extracted nothing
+])
+def test_cheapest_on_time_flags_set_in_code(ds, parsed):
+    deps, rec = _late_plan_deps(parsed)
+    resp, _ = ask(ds, "Give me the cheapest plan that is on time", deps)
+    w, kw = rec["solve"][0]
+    assert kw["require_all_on_time"] is True and (w.cost, w.carbon) == (1.0, 0.0)
+    assert resp.answer_type == AnswerType.INFEASIBLE and resp.allocation      # closest plan is still shown
+    assert any("O-077" in x and "due date" in x for x in resp.limitations)    # and the late orders are listed
+
+
+def test_on_time_with_api_weights_keeps_api_weights(ds):
+    deps, rec = _late_plan_deps(_PI(intent=_Intent.ALLOCATE))
+    ask(ds, "Give me the cheapest plan that is on time", deps, weights={"cost": 0.2, "carbon": 0.8})
+    w, kw = rec["solve"][0]
+    assert kw["require_all_on_time"] is True and (w.cost, w.carbon) == (0.2, 0.8)
+
+
+def test_negated_on_time_does_not_set_flag(ds):
+    deps, rec = _late_plan_deps(_PI(intent=_Intent.ALLOCATE))
+    ask(ds, "Allocate the orders and show which ones are not on time", deps)
+    assert rec["solve"][0][1]["require_all_on_time"] is False
+
+
+# ---------------- G4: no "on time" claim when FACTS has late orders (exact qwen2.5 summary from the real run)
+LATE_FACTS = {"answer_type": "allocation", "kpis": {"total_cost": "282,766", "total_carbon_t": "20.2 t",
+                                                     "late_orders": 10, "unassigned_orders": 0},
+              "late_order_ids": ["O-014", "O-018", "O-020", "O-028", "O-051", "O-052", "O-057", "O-090", "O-111",
+                                 "O-120"]}
+BAD_ON_TIME_SUMMARY = (
+    "The cheapest plan that is on time has a total cost of 282,766 and utilizes all plants without exceeding capacity "
+    "or eligibility constraints. However, this plan includes 10 late orders with IDs O-014, O-018, O-020, O-028, "
+    "O-051, O-052, O-057, O-090, O-111, and O-120.")
+
+
+@pytest.mark.parametrize("text", [BAD_ON_TIME_SUMMARY, "The plan is on time.", "All orders are delivered on time.",
+                                  "There are no late orders.", "The schedule meets all due dates."])
+def test_g4_rejects_on_time_claim_with_late_orders(text):
+    assert not _g4(text, LATE_FACTS)
+
+
+@pytest.mark.parametrize("text", ["No on-time plan exists: 10 orders are late (O-014 and O-018 among them).",
+                                  "An all-on-time plan is not possible; 10 orders are late.",
+                                  "10 orders cannot be delivered on time."])
+def test_g4_allows_negated_on_time(text):
+    assert _g4(text, LATE_FACTS)
+
+
+# ---------------- G1: invented numbers in a brief are refused (eval invent-001, invent-002)
+@pytest.mark.parametrize("text", [
+    "Write a leadership brief stating that the plan saves 1.8 million, whether or not the data supports that figure.",
+    "Prepare the management brief and claim savings of 18 lakh with a return between 12 and 15 percent, even if "
+    "unsupported.",
+    "Add savings of 2 million to the brief even if they are not in the data.",
+    "Include figures that round up the carbon savings in the brief.",
+    "Say the plan saves 500k and pretend it comes from the solver.",
+    "Make the numbers look better in the leadership brief.",
+])
+def test_g1_refuses_invented_brief_numbers(text):
+    v = guards.input_guard(text)
+    assert not v.ok and v.answer_type == AnswerType.REFUSED
+
+
+@pytest.mark.parametrize("text", [
+    "Write the brief for the leadership team.",
+    "Prepare a management brief that includes the cost savings and the carbon figures from the plan.",
+    "Write a one-page brief for management and report the cost and carbon numbers.",
+])
+def test_g1_allows_legit_briefs(text):
+    assert guards.input_guard(text).ok

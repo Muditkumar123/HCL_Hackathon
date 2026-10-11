@@ -22,7 +22,7 @@ import unicodedata
 from dataclasses import dataclass, field
 from typing import Any
 
-from shared.models import AnswerType, Dataset, Intent, ParsedIntent, Scenario
+from shared.models import AnswerType, Dataset, Intent, ParsedIntent, Scenario, Weights
 
 MAX_REQUEST_CHARS = 1000
 REFUSE_MESSAGE = ("I can't do that. Plans must respect capacity, eligibility and delivery rules, only the solver "
@@ -78,7 +78,17 @@ FABRICATION_PATTERNS = [
     r"\b(estimate|guess|assume|fill in)\s+(any |the |all )?missing\b",
     r"\bguess\b.{0,20}\b(numbers?|figures?|costs?|values?)\b",
     r"\bassume\b.{0,30}\b(costs?|prices?|savings?|carbon|emissions?|total)\b.{0,20}\d",
+    r"\bmake (the |our |these |those )?(numbers?|figures?|results?|savings?|costs?|plan|brief) look "
+    r"(better|good|great|nicer|stronger)",
+    r"\b(inflat\w*|exaggerat\w*|fudg\w*|pad|padding|massag\w*|cook)\b.{0,20}\b(numbers?|figures?|savings?|costs?"
+    r"|results?|books)\b",
 ]
+# "add/include/claim/say ... savings/numbers/figures" is refused only together with an unsupported-data qualifier
+CLAIM_VERB_RE = re.compile(r"\b(add|include|claim|say|state|stating|report|show|mention|put|present)\b.{0,60}"
+                           r"\b(savings?|numbers?|figures?|returns?|roi|profits?|benefits?|costs?|\d)", re.IGNORECASE)
+UNSUPPORTED_RE = re.compile(r"\b(even if|whether or not|regardless of|not in the data|not supported|unsupported"
+                            r"|without (data|evidence|support)|make up|made[- ]up|round(ed)? up|inflat\w*|pretend\w*"
+                            r"|exaggerat\w*)", re.IGNORECASE)
 OUT_OF_DATA_PATTERNS = [
     r"next (year|quarter|month)'?s?\b.{0,25}\b(prices?|costs?|tariffs?|demand)",
     r"(future|forecast(ed)?) (energy )?(price|demand|tariff)",
@@ -122,7 +132,10 @@ def input_guard(request: str) -> GuardVerdict:
                             "Plans must respect capacity, eligibility and delivery rules, and only the solver "
                             "creates allocations. I can show the closest valid plan or the cost of a valid change instead.",
                             f"rule_break:{p}")
-    if p := _match_any(FABRICATION_PATTERNS, text):
+    p = _match_any(FABRICATION_PATTERNS, text)
+    if p is None and CLAIM_VERB_RE.search(text) and (q := UNSUPPORTED_RE.search(text)):
+        p = f"unsupported_claim:{q.group(0)}"
+    if p:
         return GuardVerdict(False, AnswerType.REFUSED,
                             "I only report numbers that the solver computes from the loaded data. I won't invent, "
                             "estimate or assume figures.", f"fabrication:{p}")
@@ -137,7 +150,8 @@ def input_guard(request: str) -> GuardVerdict:
 
 # ---------------------------------------------------------------- G2
 # the LLM may set these only when the user's words ask for them
-ON_TIME_RE = re.compile(r"\bon[- ]time\b|\bno late\b", re.IGNORECASE)
+ON_TIME_RE = re.compile(r"(?<!not )(?<!n't )\b(?:on[- ]time|no late|without delays?)\b", re.IGNORECASE)
+COST_ONLY_RE = re.compile(r"\bcheapest\b|\bcost[- ]only\b", re.IGNORECASE)
 WEIGHTS_RE = re.compile(r"\bweight\w*|\bcheapest\b|\bcost[- ]only\b|\bgreenest\b", re.IGNORECASE)
 PCT_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(?:%|percent\b|per\s?cent\b|pct\b)", re.IGNORECASE)
 ORDER_REF_RE = re.compile(r"\b(?:order\s*#?\s*|o-?)(\d+)\b", re.IGNORECASE)
@@ -208,8 +222,21 @@ def _ground(intent: ParsedIntent, request: str, notes: list[str]) -> None:
         intent.weights_override = None
 
 
-def intent_guard(intent: ParsedIntent, request: str, ds: Dataset,
-                 scenario: Scenario | None = None) -> tuple[GuardVerdict, ParsedIntent]:
+def _objective_from_words(intent: ParsedIntent, request: str, api_weights: Weights | None, notes: list[str]) -> None:
+    """'Cheapest plan that is on time' is set by code, not left to the LLM (qwen2.5 returned the weights but not
+    the on-time flag). Explicit API weights still win (D-005), so cost-only weights are set only without them."""
+    if ON_TIME_RE.search(request) and not intent.require_all_on_time:
+        intent.require_all_on_time = True
+        notes.append("require_all_on_time set from the request wording")
+    if intent.require_all_on_time and COST_ONLY_RE.search(request) and api_weights is None:
+        w = intent.weights_override
+        if w is None or (w.cost, w.carbon) != (1.0, 0.0):
+            intent.weights_override = Weights(cost=1, carbon=0)
+            notes.append("cost-only weights set from the request wording")
+
+
+def intent_guard(intent: ParsedIntent, request: str, ds: Dataset, scenario: Scenario | None = None,
+                 api_weights: Weights | None = None) -> tuple[GuardVerdict, ParsedIntent]:
     """G2: the LLM may only extract, never invent; the explicit API scenario is trusted and wins.
     Returns (verdict, sanitised intent)."""
     if intent.intent == Intent.REFUSE:
@@ -227,6 +254,8 @@ def intent_guard(intent: ParsedIntent, request: str, ds: Dataset,
     if intent.intent == Intent.CLARIFY:
         return GuardVerdict(False, AnswerType.CLARIFICATION_NEEDED, CLARIFY_MESSAGE, "router:clarify",
                             notes=notes), intent
+    if intent.intent == Intent.ALLOCATE:
+        _objective_from_words(intent, request, api_weights, notes)
 
     plants = {p.upper(): p for p in ds.plants["plant"].astype(str)}
     for c in intent.capacity_changes:
@@ -422,6 +451,15 @@ EVERY_RE = re.compile(r"\b(?:every|all|each)\s+(?:the\s+)?orders?\b|\beverything
 NO_LATE_RE = re.compile(
     r"\b(?:no|zero|none of the)\s+(?:\w+\s+){0,2}late\b|\bnothing (?:is|will be) late\b"
     r"|\b(?:all|every|each)\s+(?:\w+\s+){0,2}orders?\s+(?:\w+\s+){0,3}on[- ]time\b", re.IGNORECASE)
+ON_TIME_CLAIM_RE = re.compile(
+    r"\b(?:plan|schedule|allocation|everything|all (?:the )?orders|every order|each order|deliveries)\b"
+    r"(?:\W+\w+){0,6}?\W+on[- ]time\b|\bon[- ]time (?:plan|schedule|allocation)\b|\bfully on[- ]time\b"
+    r"|\bwithout (?:any )?(?:delays?|lateness)\b|\bmeets? (?:all|every) (?:the )?(?:due dates?|deadlines?)\b",
+    re.IGNORECASE)
+ON_TIME_NEGATED_RE = re.compile(
+    r"\b(?:not|no|never|cannot|can't|unable|fail\w*|impossible|isn't|aren't|won't)\b(?:\W+\w+){0,4}?\W+on[- ]time\b"
+    r"|\bon[- ]time\b(?:\W+\w+){0,4}?\W+(?:not|impossible|cannot|can't|isn't|infeasible|unattainable)\b",
+    re.IGNORECASE)
 SENTENCE_RE = re.compile(r"(?<=[.!?;])\s+|\n+")
 # claim words are compared by root, so "moving" in the text matches "moves" in FACTS
 CLAIM_ROOTS = ("mov", "shift", "reassign", "transfer", "relocat", "recommend", "should", "suggest", "advis", "cheap",
@@ -501,7 +539,8 @@ def _claim_root(word: str) -> str:
 
 def _claim_problems(sentence: str, plants: set[str], f: _Facts) -> list[str]:
     bad = []
-    if NO_LATE_RE.search(sentence) and f.late != 0:
+    on_time_claim = ON_TIME_CLAIM_RE.search(sentence) and not ON_TIME_NEGATED_RE.search(sentence)
+    if (NO_LATE_RE.search(sentence) or on_time_claim) and f.late != 0:
         bad.append(f"unsupported claim (late orders): '{sentence[:80]}'")
     if ACTION_RE.search(sentence) and EVERY_RE.search(sentence):
         bad.append(f"unsupported claim (plan-wide move): '{sentence[:80]}'")
