@@ -37,6 +37,9 @@ OUT_OF_DATA_PATTERNS = [
     r"(future|forecast(ed)?) (energy )?(price|demand|tariff)",
     r"\b(stock|share) price\b", r"\bcompetitors?\b",
 ]
+# G2: the LLM may set these flags only when the user's words ask for them
+ON_TIME_RE = re.compile(r"\bon[- ]time\b|\bno late\b", re.IGNORECASE)
+WEIGHTS_RE = re.compile(r"\bweight\w*|\bcheapest\b|\bcost[- ]only\b|\bgreenest\b", re.IGNORECASE)
 EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.]+")
 PHONE_RE = re.compile(r"(?<!\w)(\+?\d[\d\s-]{8,}\d)(?!\w)")
 
@@ -127,6 +130,16 @@ def intent_guard(intent: ParsedIntent, request: str, scenario_numbers: set[float
             continue
         kept.append(c)
     intent.capacity_changes = kept
+
+    # objective flags must be asked for, or a plain "allocate" silently ignores the user's weights
+    if intent.require_all_on_time and not ON_TIME_RE.search(request):
+        notes.append("dropped ungrounded require_all_on_time (request does not ask for on-time delivery)")
+        intent.require_all_on_time = False
+    if intent.weights_override is not None and not WEIGHTS_RE.search(request):
+        w = intent.weights_override
+        notes.append(f"dropped ungrounded weights_override cost={w.cost:g} carbon={w.carbon:g} "
+                     "(request names no weights)")
+        intent.weights_override = None
 
     # entities must exist
     if intent.order_id is not None:

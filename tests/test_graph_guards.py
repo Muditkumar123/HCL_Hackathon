@@ -116,6 +116,35 @@ def test_ungrounded_number_dropped(ds):
     assert not v.ok and it2.capacity_changes == []      # 40 was invented -> dropped -> clarify
 
 
+def _biased_llm_deps() -> tuple[Deps, list]:
+    """Router that copies the 'cheapest plan that is on time' example into every request, as qwen2.5:7b did."""
+    from shared.models import Intent, ParsedIntent
+    calls: list = []
+    d = make_deps()
+    solve = d.solve
+    d.solve = lambda ds, w, **kw: calls.append((w, kw)) or solve(ds, w, **kw)
+    d.parse_intent = lambda text: (ParsedIntent(intent=Intent.ALLOCATE, require_all_on_time=True,
+                                                weights_override=Weights(cost=1, carbon=0), parsed_by="llm"), 5, True)
+    return d, calls
+
+
+def test_plain_allocate_keeps_slider_weights(ds):
+    deps, calls = _biased_llm_deps()
+    resp, _ = ask(ds, "Allocate this week's orders", deps, weights={"cost": 0.7, "carbon": 0.3, "lateness": 1.0})
+    w, kw = calls[0]
+    assert (w.cost, w.carbon) == (0.7, 0.3) and kw["require_all_on_time"] is False
+    assert (resp.weights_used.cost, resp.weights_used.carbon) == (0.7, 0.3)
+    assert any("dropped ungrounded weights_override" in a for a in resp.assumptions)
+    assert any("dropped ungrounded require_all_on_time" in a for a in resp.assumptions)
+
+
+def test_cheapest_on_time_keeps_overrides(ds):
+    deps, calls = _biased_llm_deps()
+    ask(ds, "Give me the cheapest plan that is on time", deps, weights={"cost": 0.7, "carbon": 0.3})
+    w, kw = calls[0]
+    assert (w.cost, w.carbon) == (1.0, 0.0) and kw["require_all_on_time"] is True
+
+
 # ---------------- tool paths + G3
 def test_allocate_happy_path(ds):
     resp, trace = ask(ds, "Allocate this week's orders")
@@ -156,3 +185,125 @@ def test_faithful_writer_passes(ds):
 
 def test_extract_numbers_formats():
     assert guards.extract_numbers("1,840,000 and 1.84M, 3k, 12.5%") == [1840000, 1840000, 3000, 12.5]
+
+
+# ---------------- tool stubs (USE_TOOL_STUBS=true): real numbers from the data, greedy instead of the MIP
+from ai.generation import tool_stubs as stubs  # noqa: E402
+from shared.models import CapacityChange  # noqa: E402
+
+
+@pytest.fixture
+def ds6() -> Dataset:
+    """6 orders x 3 plants. Traps: B is cheapest to DE but late (8-day transit); a 30% duty makes B dearer to FR;
+    C is the low-carbon plant with tiny capacity; C cannot make P2."""
+    return Dataset(
+        orders=pd.DataFrame({
+            "order_id": ["O-1", "O-2", "O-3", "O-4", "O-5", "O-6"], "product": ["P1", "P1", "P2", "P2", "P1", "P1"],
+            "qty": [100, 200, 150, 100, 250, 100], "destination": ["DE", "FR", "DE", "FR", "DE", "FR"],
+            "due": ["2026-10-14", "2026-10-20", "2026-10-20", "2026-10-27", "2026-10-27", "2026-10-20"]}),
+        plants=pd.DataFrame({
+            "plant": ["A", "A", "B", "B", "C"], "product": ["P1", "P2", "P1", "P2", "P1"],
+            "weekly_capacity": [400, 400, 300, 300, 150], "unit_cost": [10, 8, 9, 7, 11],
+            "energy_kwh_per_unit": [2] * 5, "carbon_kg_per_kwh": [0.5, 0.5, 0.8, 0.8, 0.1]}),
+        transport_duties=pd.DataFrame({
+            "plant": ["A", "A", "B", "B", "C", "C"], "destination": ["DE", "FR"] * 3,
+            "transport_cost_per_unit": [1.0, 1.5, 0.5, 0.5, 1.0, 1.0], "transit_days": [2, 3, 8, 2, 2, 2],
+            "duty_pct": [0, 0, 0, 30, 0, 0], "carbon_kg_per_unit": [0.2, 0.3, 0.4, 0.2, 0.1, 0.1]}),
+        capacity_events=pd.DataFrame(), planning_start=date(2026, 10, 5), data_version="test6",
+    )
+
+
+def stub_deps() -> Deps:
+    return Deps(solve=stubs.solve_allocation, validate=stubs.validate_plan, frontier=stubs.tradeoff_frontier,
+                compare=stubs.compare_plans, counterfactual=stubs.counterfactual,
+                parse_intent=lambda text: (rules_parse(text), 0, False), write=lambda *_a, **_k: (None, 0))
+
+
+def test_default_deps_switches_to_stubs(monkeypatch):
+    from ai.graph import default_deps
+    monkeypatch.setenv("USE_TOOL_STUBS", "true")
+    assert default_deps().solve is stubs.solve_allocation
+
+
+def test_stub_costs_come_from_data(ds6):
+    res = stubs.solve_allocation(ds6, Weights())
+    o1 = next(a for a in res.assignments if a.order_id == "O-1")
+    # landed cost = qty*unit_cost*(1+duty) + qty*transport; carbon = qty*(kwh*kg_per_kwh + lane kg)
+    expected = {"A": (1100, 120), "B": (950, 200), "C": (1200, 30)}[o1.plant]
+    assert (o1.cost, o1.carbon_kg) == expected
+    assert res.kpis.total_cost == pytest.approx(sum(a.cost for a in res.assignments))
+    assert res.status == "FEASIBLE" and stubs.STUB_NOTE in res.notes
+
+
+def test_stub_cheapest_late_goes_elsewhere_and_validates(ds6):
+    res = stubs.solve_allocation(ds6, Weights())
+    o1 = next(a for a in res.assignments if a.order_id == "O-1")
+    assert o1.plant != "B" and o1.on_time
+    v = stubs.validate_plan(ds6, res.assignments)
+    assert v.capacity_ok and v.eligibility_ok and v.violations == []
+
+
+def test_stub_validator_catches_overload(ds6):
+    res = stubs.solve_allocation(ds6, Weights())
+    bad = [a.model_copy(update={"plant": "C", "production_week": date(2026, 10, 5)}) for a in res.assignments
+           if a.order_id in ("O-2", "O-5")]
+    assert not stubs.validate_plan(ds6, bad + [a for a in res.assignments if a.order_id not in ("O-2", "O-5")]).capacity_ok
+
+
+def test_stub_capacity_loss_moves_orders(ds6):
+    base = stubs.solve_allocation(ds6, Weights())
+    new = stubs.solve_allocation(ds6, Weights(), changes=[CapacityChange(plant="A", capacity_loss_pct=100)],
+                                 base_plan=base.assignments)
+    assert all(a.plant != "A" for a in new.assignments)
+    assert stubs.compare_plans(ds6, base, new)
+
+
+def test_stub_tradeoff_meets_carbon_caps(ds6):
+    pts = stubs.tradeoff_frontier(ds6, Weights(cost=1, carbon=0), cuts=(0, 10))
+    assert pts[0].implied_carbon_price_per_t is None
+    if pts[1].feasible:
+        assert pts[1].carbon_t <= pts[0].carbon_t * 0.9 + 1e-6 and pts[1].cost >= pts[0].cost
+
+
+def test_stub_counterfactual_ineligible_blocked(ds6):
+    base = stubs.solve_allocation(ds6, Weights())
+    assert stubs.counterfactual(ds6, base, "O-3", "C").blocked_by == "eligibility"
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("Allocate this week's orders", {AnswerType.ALLOCATION, AnswerType.INFEASIBLE}),
+    ("What does a 10% carbon cut cost?", {AnswerType.SCENARIO}),
+    ("Plant A loses 30% capacity. Re-plan.", {AnswerType.SCENARIO, AnswerType.INFEASIBLE}),
+    ("Why was order 2 built there?", {AnswerType.SCENARIO}),
+    ("Write the brief for the leadership team", {AnswerType.BRIEF}),
+])
+def test_stub_end_to_end(ds6, text, expected):
+    resp, trace = ask(ds6, text, stub_deps())
+    assert resp.answer_type in expected and resp.validator is not None and resp.faithfulness_ok
+    assert trace.latency_ms < 10_000
+
+
+# ---------------- frontend helpers (pure; no Streamlit runtime needed)
+def test_frontend_payload_and_chart():
+    from frontend.app import allocation_frame, build_payload, style_late_rows, tradeoff_figure
+    from shared.models import AnalyzeResponse
+    p = build_payload("Plant B loses 30% capacity. Re-plan.", 70, 1.0, {"plant": "B", "capacity_loss_pct": 30})
+    req = AnalyzeRequest(**p)
+    assert req.weights.cost == 0.7 and req.scenario.capacity_changes[0].plant == "B"
+    plan = _plan(late=1)
+    resp = AnalyzeResponse(run_id="al-x", answer_type=AnswerType.SCENARIO, summary="s", allocation=plan.assignments,
+                           kpis=plan.kpis, tradeoff=[TradeoffPoint(carbon_cut_pct=c, cost=100 + c, carbon_t=10 - c,
+                                                                   late_orders=0, feasible=c < 30) for c in (0, 10, 30)])
+    fig = tradeoff_figure(resp)
+    assert [t.name for t in fig.data] == ["Feasible", "Not feasible", "Chosen plan"]
+    assert fig.data[2].x[0] == plan.kpis.total_carbon_t
+    df = allocation_frame(resp)
+    assert "rgba(220" in style_late_rows(df).to_html()            # the late row is shaded red
+
+
+def test_graph_compiled_once_per_deps(ds):
+    deps = make_deps()
+    ask(ds, "Allocate this week's orders", deps)
+    compiled = deps.graph()
+    ask(ds, "What does a 10% carbon cut cost?", deps)
+    assert deps.graph() is compiled

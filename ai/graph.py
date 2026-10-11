@@ -28,8 +28,10 @@ from __future__ import annotations
 
 import logging
 import operator
+import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from functools import lru_cache
 from typing import Annotated, Any, Callable, TypedDict
 
 from langgraph.graph import END, START, StateGraph
@@ -57,12 +59,29 @@ class Deps:
     parse_intent: Callable[[str], tuple[ParsedIntent, int, bool]] = router.parse_intent
     write: Callable[..., tuple[str | None, int]] = writer.write
     base_plan: Callable[[], SolveResult | None] = lambda: None   # backend.store.latest_plan
+    _graph: Any = field(default=None, init=False, repr=False, compare=False)
+
+    def graph(self) -> Any:
+        """Compiled once per Deps. Nodes read deps attributes at call time, so later edits still apply."""
+        if self._graph is None:
+            self._graph = build_graph(self)
+        return self._graph
+
+
+def use_tool_stubs() -> bool:
+    return os.getenv("USE_TOOL_STUBS", "false").lower() == "true"
 
 
 def default_deps() -> Deps:
-    from ai.tools.scenarios import compare_plans, counterfactual, tradeoff_frontier
-    from ai.tools.solver import solve_allocation
-    from ai.tools.validator import validate_plan
+    if use_tool_stubs():  # development only (CLAUDE.md rule 2): must be off for the demo
+        log.warning("USE_TOOL_STUBS=true: using ai/generation/tool_stubs.py instead of ai/tools")
+        from ai.generation.tool_stubs import (
+            compare_plans, counterfactual, solve_allocation, tradeoff_frontier, validate_plan,
+        )
+    else:
+        from ai.tools.scenarios import compare_plans, counterfactual, tradeoff_frontier
+        from ai.tools.solver import solve_allocation
+        from ai.tools.validator import validate_plan
 
     try:
         from backend.store import latest_plan
@@ -70,6 +89,13 @@ def default_deps() -> Deps:
         latest_plan = lambda: None  # noqa: E731
     return Deps(solve=solve_allocation, validate=validate_plan, frontier=tradeoff_frontier,
                 compare=compare_plans, counterfactual=counterfactual, base_plan=latest_plan)
+
+
+@lru_cache(maxsize=1)
+def _default() -> Deps:
+    """The process-wide Deps used by run() when the caller passes none. default_deps() stays a fresh factory,
+    so callers that modify the Deps they get (tests) never change this shared one."""
+    return default_deps()
 
 
 # ============================================================ state
@@ -390,13 +416,9 @@ def _explain_sentence(oid: str, chosen: str | None, cfs: list[CounterfactualResu
 
 
 # ============================================================ entry point (called by backend /analyze)
-_COMPILED: dict[int, Any] = {}
-
-
 def run(req: AnalyzeRequest, ds: Dataset, deps: Deps | None = None) -> tuple[AnalyzeResponse, TraceRecord]:
     t0 = time.perf_counter()
-    deps = deps or default_deps()
-    graph = _COMPILED.setdefault(id(deps), build_graph(deps))
+    graph = (deps or _default()).graph()
     run_id = new_run_id()
     try:
         s: State = graph.invoke({"req": req, "ds": ds, "run_id": run_id, "steps": [], "llm_calls": 0,

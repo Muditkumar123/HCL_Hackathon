@@ -27,6 +27,7 @@ def get_llm() -> Any | None:
     kwargs: dict[str, Any] = {"temperature": 0}
     if provider == "ollama":
         kwargs["base_url"] = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+        kwargs["keep_alive"] = -1                       # never unload: avoids a cold load on the first demo request
         if model.startswith("qwen3"):
             kwargs["reasoning"] = False                 # no <think> blocks
     return init_chat_model(model, model_provider=provider, **kwargs)
