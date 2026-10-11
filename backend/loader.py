@@ -96,7 +96,7 @@ def _row_errors(table: str, df: pd.DataFrame, known_plants: set[str]) -> tuple[p
         clean["transit_days"] = clean["transit_days"].astype(int)
     for col in DATES.get(table, []):
         clean[col] = clean[col].dt.date
-    return clean.reset_index(drop=True), [errors[i] for i in bad]
+    return clean, [errors[i] for i in bad]          # clean keeps the CSV row index (line = index + 2)
 
 
 def load_csv(table: TableName, file: BinaryIO | Path | bytes,
@@ -122,10 +122,18 @@ def load_csv(table: TableName, file: BinaryIO | Path | bytes,
         return IngestResponse(table=table, rows_loaded=0, rows_rejected=len(errors), status="error",
                               errors=(errors or ["file has no data rows"])[:MAX_ERRORS])
 
-    store.write_table(table, clean, mode=mode)
+    keys = [k for k in KEYS.get(table, []) if k in clean.columns]
+    skipped = store.write_table(table, clean, mode=mode, keys=keys)
+    if len(skipped):  # append mode: key already in the table (checked atomically in the store)
+        dups = [f"line {i + 2}: duplicate key {tuple(clean.loc[i, keys])} already in the {table} table" for i in skipped]
+        errors = sorted(errors + dups, key=lambda e: int(e.split(":")[0].split()[1]))
+    loaded = len(clean) - len(skipped)
+    if loaded == 0:
+        return IngestResponse(table=table, rows_loaded=0, rows_rejected=len(errors), status="error",
+                              errors=errors[:MAX_ERRORS], data_version=store.load_dataset().data_version)
     version = store.load_dataset().data_version
-    log.info("ingest table=%s loaded=%d rejected=%d version=%s", table, len(clean), len(errors), version)
-    return IngestResponse(table=table, rows_loaded=len(clean), rows_rejected=len(errors),
+    log.info("ingest table=%s loaded=%d rejected=%d version=%s", table, loaded, len(errors), version)
+    return IngestResponse(table=table, rows_loaded=loaded, rows_rejected=len(errors),
                           status="partial" if errors else "ok", errors=errors[:MAX_ERRORS], data_version=version)
 
 

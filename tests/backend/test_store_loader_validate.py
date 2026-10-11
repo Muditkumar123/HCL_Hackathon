@@ -105,6 +105,35 @@ def test_loader_rejects_bad_values(db):
     assert "> 100" in res.errors[0] and "before from_date" in res.errors[1]
 
 
+def test_append_rejects_keys_already_in_table(loaded):
+    v1 = loaded.load_dataset().data_version
+    text = ("order_id,product,qty,destination,due\n"
+            "O-1,P1,5,DE,2026-10-25\n"        # line 2: O-1 already loaded
+            "O-5,P1,7,DE,2026-10-25\n"        # line 3: new
+            "O-6,P1,-1,DE,2026-10-25\n")      # line 4: bad value
+    res = loader.load_csv("orders", text.encode(), mode="append")
+    assert res.status == "partial" and res.rows_loaded == 1 and res.rows_rejected == 2
+    assert res.errors[0].startswith("line 2: duplicate key ('O-1',) already in the orders table")
+    assert res.errors[1].startswith("line 4: qty=-1 is negative")
+    orders = loaded.load_dataset().orders
+    assert len(orders) == 5 and orders["order_id"].is_unique
+    assert loaded.load_dataset().data_version != v1
+
+
+def test_append_of_only_existing_keys_changes_nothing(loaded):
+    v1 = loaded.load_dataset().data_version
+    res = loader.load_csv("transport_duties", ("plant,destination,transport_cost_per_unit,transit_days,duty_pct,"
+                                               "carbon_kg_per_unit\nA,DE,9,9,9,9\n").encode(), mode="append")
+    assert res.status == "error" and res.rows_loaded == 0 and res.rows_rejected == 1
+    assert "duplicate key ('A', 'DE') already in the transport_duties table" in res.errors[0]
+    assert loaded.load_dataset().data_version == v1                 # table untouched
+
+
+def test_replace_still_allows_reloading_same_keys(loaded):
+    res = loader.load_csv("orders", CSVS["orders"].encode(), mode="replace")
+    assert res.status == "ok" and res.rows_loaded == 4
+
+
 def test_loader_keeps_extra_columns(loaded):
     assert "priority" in loaded.load_dataset().orders.columns
 

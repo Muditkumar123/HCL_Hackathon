@@ -92,17 +92,33 @@ def _text_to_dates(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
     return df
 
 
-def write_table(table: TableName, df: pd.DataFrame, mode: Literal["replace", "append"] = "replace") -> None:
+def write_table(table: TableName, df: pd.DataFrame, mode: Literal["replace", "append"] = "replace",
+                keys: list[str] | None = None) -> pd.Index:
+    """Write `df` to `table`. In append mode with `keys`, rows whose key already exists in the table are NOT
+    written; their index labels are returned so the caller can report them. The key check and the write happen
+    under one lock, so two concurrent appends cannot both add the same key."""
     if table not in TABLES:
         raise ValueError(f"unknown table {table!r}; expected one of {TABLES}")
-    df = _dates_to_text(df, DATE_COLUMNS.get(table, []))
+    skipped = df.index[:0]
     with _lock, _connect() as conn:
         if mode == "append" and _table_exists(conn, table):
             existing = pd.read_sql_query(f'SELECT * FROM "{table}"', conn)
-            df = pd.concat([existing, df], ignore_index=True)
+            common = [k for k in (keys or []) if k in existing.columns and k in df.columns]
+            if common:
+                have = set(existing[common].astype(str).itertuples(index=False, name=None))
+                clash = [tuple(r) in have for r in df[common].astype(str).itertuples(index=False, name=None)]
+                skipped = df.index[clash]
+                df = df.drop(index=skipped)
+            if df.empty:
+                log.info("append table=%s: every row already exists, nothing written", table)
+                return skipped
+            df = pd.concat([existing, _dates_to_text(df, DATE_COLUMNS.get(table, []))], ignore_index=True)
+        else:
+            df = _dates_to_text(df, DATE_COLUMNS.get(table, []))
         df.to_sql(table, conn, if_exists="replace", index=False)
         _invalidate()
-    log.info("wrote table=%s rows=%d mode=%s", table, len(df), mode)
+    log.info("wrote table=%s rows=%d mode=%s skipped=%d", table, len(df), mode, len(skipped))
+    return skipped
 
 
 def read_table(table: TableName) -> pd.DataFrame:

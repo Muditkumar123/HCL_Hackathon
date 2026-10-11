@@ -62,6 +62,9 @@ def test_ingest_append_mode(client):
     r = _ingest(client, "orders", "order_id,product,qty,destination,due\nO-5,P1,10,DE,2026-10-25\n", mode="append")
     assert r.json()["rows_loaded"] == 1
     assert client.get("/health").json()["tables"]["orders"] == 5
+    again = _ingest(client, "orders", "order_id,product,qty,destination,due\nO-5,P1,10,DE,2026-10-25\n", mode="append")
+    assert again.status_code == 422 and "already in the orders table" in again.json()["errors"][0]
+    assert client.get("/health").json()["tables"]["orders"] == 5            # REVIEW-002: no duplicate O-5
 
 
 def test_health_empty_then_loaded(client):
