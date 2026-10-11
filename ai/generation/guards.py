@@ -46,7 +46,7 @@ def normalise(text: str, keep_lines: bool = False) -> str:
 # ---------------------------------------------------------------- G1 patterns (matched on normalised text)
 INJECTION_PATTERNS = [
     r"\b(ignore|forget|disregard|override|bypass)\b.{0,40}\b(instructions?|rules|prompts?|safeguards?|guardrails?"
-    r"|guidelines|policies|restrictions)\b",
+    r"|guidelines|guidance|policies|restrictions|constraints)\b",
     r"\b(reveal|show|print|repeat|leak|display)\b.{0,30}\b(hidden|system|developer|secret|internal)\s+"
     r"(prompt|instructions|rules|message)",
     r"\bsystem prompt\b", r"\byou(?: are|'re) (now|no longer)\b", r"\bdeveloper mode\b", r"\bjailbreak\b",
@@ -67,9 +67,19 @@ RULE_BREAK_PATTERNS = [
     r"|isn't able|is not able)",
     r"\b(write|make|create|edit|change|produce|do|build|generate)\s+(the |an |my |a |this )?(allocation|plan|schedule)"
     r"\s+(yourself|manually|by hand|directly|without)",
-    r"\bwithout (using |calling |running )?(the |any )?(solver|optimi[sz]er|optimi[sz]ation|validator)\b",
+    r"\bwithout (using |calling |running )?(the |any )?(tools?|solver|optimi[sz]er|optimi[sz]ation|validator)\b",
     r"\bmanually (allocate|assign|plan|schedule|place|move)\b|\bby hand\b",
+    r"\b(hand[- ]?(written|made|crafted|built|picked)|manual)\s+(allocation|plan|schedule|assignment)s?\b",
+    # "treat <rule> as optional", "skip/waive <rule>": eligibility, capacity and delivery rules are hard constraints
+    r"\btreat\w*\s+(the\s+|its\s+|their\s+)?(\w+\s+){0,2}?(rules?|constraints?|eligibility|capacit(y|ies)"
+    r"|due[- ]dates?|deadlines?|limits?|checks?)\s+as\s+(optional|soft|flexible|suggestions?|guidelines?|negotiable"
+    r"|irrelevant|unimportant|advisory|non-binding)\b",
+    r"\b(skip\w*|waiv\w*|relax\w*|suspend\w*|disabl\w*|turn(ing)? off|switch(ing)? off)\s+(the\s+|all\s+|any\s+)?"
+    r"(\w+\s+){0,2}?(eligibility|capacity|due[- ]dates?|delivery)\b",
 ]
+# shown in the trace: G1 is a first filter, not the only one
+DEFENCE_IN_DEPTH = ("pass; eligibility, capacity and delivery rules are also enforced by G2, the solver and "
+                    "validate_plan (defence in depth), so a G1 miss cannot produce an ineligible plan")
 FABRICATION_PATTERNS = [
     r"\b(fictional|fictitious|fake|dummy|made[- ]up|imaginary|placeholder|bogus)\b",
     r"\bhallucinat\w*",
@@ -145,7 +155,7 @@ def input_guard(request: str) -> GuardVerdict:
                             f"out_of_data:{p}")
     cleaned = PHONE_RE.sub("[PHONE]", EMAIL_RE.sub("[EMAIL]", text))
     notes = ["PII masked before LLM call"] if cleaned != text else []
-    return GuardVerdict(True, check="pass", cleaned=cleaned, notes=notes)
+    return GuardVerdict(True, check=DEFENCE_IN_DEPTH, cleaned=cleaned, notes=notes)
 
 
 # ---------------------------------------------------------------- G2
@@ -460,6 +470,11 @@ ON_TIME_NEGATED_RE = re.compile(
     r"\b(?:not|no|never|cannot|can't|unable|fail\w*|impossible|isn't|aren't|won't)\b(?:\W+\w+){0,4}?\W+on[- ]time\b"
     r"|\bon[- ]time\b(?:\W+\w+){0,4}?\W+(?:not|impossible|cannot|can't|isn't|infeasible|unattainable)\b",
     re.IGNORECASE)
+LATE_WORD_RE = re.compile(r"\blate\b|\bdelayed\b|\bafter (the |their |its )?due dates?\b"
+                          r"|\bmiss(es|ed)? (the |their |its )?due dates?\b", re.IGNORECASE)
+UNASSIGNED_WORD_RE = re.compile(r"\bun(assigned|allocated)\b|\bnot (be )?(assigned|allocated|produced)\b"
+                                r"|\b(cannot|can't|could not|couldn't) be (produced|made|assigned|placed|scheduled)\b",
+                                re.IGNORECASE)
 SENTENCE_RE = re.compile(r"(?<=[.!?;])\s+|\n+")
 # claim words are compared by root, so "moving" in the text matches "moves" in FACTS
 CLAIM_ROOTS = ("mov", "shift", "reassign", "transfer", "relocat", "recommend", "should", "suggest", "advis", "cheap",
@@ -475,6 +490,8 @@ class _Facts:
     ents: _Entities
     records: list[tuple[set[str], str]]     # (plants, lower-case text) that a plant claim can cite
     late: int | None                        # late + unassigned orders, None if FACTS has no KPIs
+    late_ids: set[tuple[str | None, str]] = field(default_factory=set)        # arrive after the due date
+    unassigned_ids: set[tuple[str | None, str]] = field(default_factory=set)  # not produced within capacity
 
 
 def _record_plants(d: dict) -> set[str]:
@@ -512,6 +529,9 @@ def _read_facts(facts: dict) -> _Facts:
             f.tokens.append(Token(float(v), False, "", str(v)))
 
     walk(facts, [])
+    for key, target in (("late_order_ids", f.late_ids), ("unassigned_order_ids", f.unassigned_ids)):
+        for oid in facts.get(key) or []:
+            target |= _entities(str(oid))[0].ids
     k = facts.get("kpis")
     if isinstance(k, dict) and isinstance(k.get("late_orders"), int):
         f.late = k["late_orders"] + int(k.get("unassigned_orders") or 0)
@@ -535,6 +555,23 @@ def _id_ok(i: tuple[str | None, str], known: set[tuple[str | None, str]]) -> boo
 def _claim_root(word: str) -> str:
     w = word.lower()
     return next((r for r in CLAIM_ROOTS if w.startswith(r)), w)
+
+
+def _category_problems(sentence: str, ids: set[tuple[str | None, str]], f: _Facts) -> list[str]:
+    """An unassigned order is not 'late' and a late order is not 'unassigned'. Only checked when the sentence uses
+    one of the two words, so 'O-1 is late and O-2 is unassigned' is not misattributed."""
+    late_word, unassigned_word = bool(LATE_WORD_RE.search(sentence)), bool(UNASSIGNED_WORD_RE.search(sentence))
+    if late_word == unassigned_word:
+        return []
+    bad = []
+    for i in sorted(ids, key=str):
+        is_late, is_unassigned = _id_ok(i, f.late_ids), _id_ok(i, f.unassigned_ids)
+        name = (i[0] or "order ") + i[1]
+        if late_word and is_unassigned and not is_late:
+            bad.append(f"{name} is unassigned (not produced), not late")
+        if unassigned_word and is_late and not is_unassigned:
+            bad.append(f"{name} is late (produced after its due date), not unassigned")
+    return bad
 
 
 def _claim_problems(sentence: str, plants: set[str], f: _Facts) -> list[str]:
@@ -575,6 +612,7 @@ def check_faithfulness(text: str, facts: dict, request: str = "") -> tuple[bool,
         bad += [f"unknown plant {p}" for p in sorted(ents.plants - f.ents.plants)]
         bad += [f"unknown date {d}" for d in sorted(ents.dates - f.ents.dates)]
         bad += _claim_problems(sentence, ents.plants, f)
+        bad += _category_problems(sentence, ents.ids, f)
     return (not bad), bad, checked
 
 
@@ -595,7 +633,11 @@ def template_summary(answer_type: AnswerType, facts: dict) -> str:
     k = facts.get("kpis", {})
     if k:
         parts.append(f"Plan cost {k.get('total_cost', 'n/a')}, carbon {k.get('total_carbon_t', 'n/a')}, "
-                     f"{k.get('late_orders', 'n/a')} late orders.")
+                     f"{k.get('late_orders', 'n/a')} late orders, {k.get('unassigned_orders', 0)} unassigned orders.")
+    if facts.get("late_order_ids"):
+        parts.append(f"Orders late (after due date): {', '.join(facts['late_order_ids'])}.")
+    if facts.get("unassigned_order_ids"):
+        parts.append(f"Orders that cannot be produced within capacity: {', '.join(facts['unassigned_order_ids'])}.")
     if facts.get("changes_count") is not None:
         parts.append(f"{facts['changes_count']} orders moved; cost change {facts.get('cost_delta', 'n/a')}, "
                      f"carbon change {facts.get('carbon_delta_t', 'n/a')}.")

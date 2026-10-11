@@ -20,6 +20,7 @@ from typing import Any, Literal
 
 import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic.json_schema import SkipJsonSchema
 
 
 def utcnow() -> datetime:
@@ -227,6 +228,9 @@ class TradeoffPoint(BaseModel):
     late_orders: int
     feasible: bool = True
     implied_carbon_price_per_t: float | None = None  # delta cost / delta carbon vs the 0% point
+    # The frontier's own plan for this cut (internal: never serialised). When set, a requested cut is answered with
+    # exactly this plan, so the answer and the trade-off table always agree (DECISIONS.md D-007).
+    plan: SkipJsonSchema[SolveResult | None] = Field(default=None, exclude=True, repr=False)
 
 
 class PlanChange(BaseModel):
@@ -262,6 +266,9 @@ class SolveResult(BaseModel):
     objective: float | None = None
     weights_used: Weights
     notes: list[str] = Field(default_factory=list)
+
+
+TradeoffPoint.model_rebuild()  # resolve the forward reference to SolveResult
 
 
 class Recommendation(BaseModel):

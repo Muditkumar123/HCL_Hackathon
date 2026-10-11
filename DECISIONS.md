@@ -36,3 +36,11 @@
   are listed in `limitations`, flagged by `validator.delivery_ok=false`, and the writer must mention them.
 - Why: the guide's own example returns `answer_type: "allocation"` with 2 late orders.
 - TASK-003 line 105 updated to match.
+
+## D-007 Contract: `TradeoffPoint.plan` (internal, never serialised); a requested cut is never re-solved
+- Why: the graph re-solved a requested carbon cut on its own. That solve could differ from the frontier's (no
+  warm start, different candidate), so the table said "5% feasible" while the answer said "infeasible" (eval trade-04).
+- Change: `TradeoffPoint.plan: SolveResult | None` (excluded from JSON and the schema). The graph answers a requested
+  cut from the frontier's own point: if `plan` is attached it is validated and shown; if not, the answer is the
+  point's numbers only (no allocation); if the point is infeasible the answer is `infeasible`. No separate solve.
+- Ask for Ayush: in `tradeoff_frontier`, attach the chosen `SolveResult` per point (`plan=...`).

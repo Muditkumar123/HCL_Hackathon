@@ -116,6 +116,7 @@ class State(TypedDict, total=False):
     validator: ValidatorResult
     plan_valid: bool
     cut_infeasible: bool
+    aggregate_only: bool
     facts: dict
     mode: str
     text: str
@@ -151,8 +152,13 @@ def pct(x: float) -> str:
     return f"{x * 100:.0f}%"
 
 
-def _carbon_kg(res: SolveResult) -> float:
-    return sum(a.carbon_kg for a in res.assignments if a.plant is not None)
+def _late_ids(res: SolveResult) -> list[str]:
+    """Produced but arriving after the due date. Unassigned orders are NOT late: they are not produced at all."""
+    return [a.order_id for a in res.assignments if a.plant is not None and not a.on_time][:10]
+
+
+def _unassigned_ids(res: SolveResult) -> list[str]:
+    return [a.order_id for a in res.assignments if a.plant is None][:10]
 
 
 def _order_plant(res: SolveResult, order_id: str) -> str | None:
@@ -237,18 +243,25 @@ def build_graph(deps: Deps):
                                     output={"points": len(points)})}
         if not cut:
             return out
-        # a requested cut answers with that cut's own plan (validated by the checker), never the 0% plan
+        # a requested cut is answered from the frontier's own result for that cut, never a separate re-solve,
+        # so the answer and the trade-off table always agree on feasibility and numbers (D-007)
         t1, point = time.perf_counter(), next((p for p in points if p.carbon_cut_pct == cut), None)
-        chosen = (deps.solve(ds, w, carbon_cap_kg=_carbon_kg(res) * (1 - cut / 100))
-                  if point is not None and point.feasible and res.kpis is not None else None)
-        if (chosen is not None and chosen.status in ("OPTIMAL", "FEASIBLE") and chosen.kpis is not None
-                and chosen.kpis.unassigned_orders <= res.kpis.unassigned_orders):   # no dropping orders to hit the cap
-            out.update(base=res, result=chosen, changes=deps.compare(ds, res, chosen))
-        else:  # infeasible cut: say so and keep the current plan as the closest valid plan
+        if point is None:
+            out.update(limitations=[f"The trade-off for a {cut:g}% carbon cut was not computed."])
+            used = "not computed"
+        elif not point.feasible:  # say so and keep the current plan as the closest valid plan
             out.update(answer_type=AnswerType.INFEASIBLE, cut_infeasible=True,
                        limitations=[f"A {cut:g}% carbon cut is not feasible; the current plan is shown."])
-        out["steps"] += _step("optimiser", "solve_allocation(carbon_cap)", t1, input={"carbon_cut_pct": cut},
-                              output={"status": chosen.status if chosen else "not run (cut infeasible)"})
+            used = "infeasible"
+        elif point.plan is not None and point.plan.kpis is not None:   # the frontier's plan, validated by the checker
+            out.update(base=res, result=point.plan, changes=deps.compare(ds, res, point.plan))
+            used = "frontier plan"
+        else:  # the frontier gave numbers but no plan: answer from the point, show no allocation
+            out.update(aggregate_only=True,
+                       limitations=[f"The {cut:g}% carbon cut figures come from the trade-off table; "
+                                    "no plan for that cut is shown."])
+            used = "frontier point (no plan attached)"
+        out["steps"] += _step("scenario", "select_cut", t1, input={"carbon_cut_pct": cut}, output={"used": used})
         return out
 
     def replan(s: State) -> dict:
@@ -294,15 +307,16 @@ def build_graph(deps: Deps):
                     "facts": {"answer_type": AnswerType.INFEASIBLE.value, "violations": v.violations[:5],
                               "validator": {"capacity_ok": v.capacity_ok, "eligibility_ok": v.eligibility_ok}},
                     "steps": _step("checker", "validate_plan", t0, output=v.model_dump())}
-        k = res.kpis
+        k = None if s.get("aggregate_only") else res.kpis   # aggregate answers describe the cut, not this plan
         if k and k.unassigned_orders:
             at = AnswerType.INFEASIBLE
-            lim.append(f"{k.unassigned_orders} orders cannot be produced within capacity.")
+            lim.append(f"{k.unassigned_orders} orders cannot be produced within capacity: "
+                       f"{', '.join(_unassigned_ids(res))}.")
         if k and k.late_orders:
             if s["intent"].require_all_on_time:
                 at = AnswerType.INFEASIBLE
-            late_ids = [a.order_id for a in res.assignments if not a.on_time][:10]
-            lim.append(f"{k.late_orders} orders cannot meet their due date in this plan: {', '.join(late_ids)}.")
+            lim.append(f"{k.late_orders} orders arrive after their due date in this plan: "
+                       f"{', '.join(_late_ids(res))}.")
         return {"validator": v, "plan_valid": True, "answer_type": at, "limitations": lim + res.notes,
                 "facts": _facts({**s, "answer_type": at}, v),
                 "steps": _step("checker", "validate_plan", t0, output=v.model_dump())}
@@ -371,12 +385,13 @@ def _facts(s: State, v: ValidatorResult) -> dict:
     f: dict[str, Any] = {"answer_type": s["answer_type"].value,
                          "weights_used": {"cost": pct(s["weights"].cost), "carbon": pct(s["weights"].carbon)},
                          "validator": {"capacity_ok": v.capacity_ok, "eligibility_ok": v.eligibility_ok}}
-    if res.kpis:
+    if res.kpis and not s.get("aggregate_only"):
         k = res.kpis
         f["kpis"] = {"total_cost": money(k.total_cost), "total_carbon_t": f"{k.total_carbon_t:,.1f} t",
                      "late_orders": k.late_orders, "unassigned_orders": k.unassigned_orders,
                      "plant_utilisation": {p: pct(u) for p, u in k.plant_utilisation.items()}}
-        f["late_order_ids"] = [a.order_id for a in res.assignments if not a.on_time][:10]
+        f["late_order_ids"] = _late_ids(res)                 # produced, but arrive after the due date
+        f["unassigned_order_ids"] = _unassigned_ids(res)     # cannot be produced within capacity
     it = s["intent"]
     if it.capacity_changes:  # grounded (G2) or API-given request parameters: the writer may restate them
         f["capacity_changes"] = [{"plant": c.plant, "capacity_loss": f"{c.capacity_loss_pct:g}%",
@@ -485,7 +500,8 @@ def _assemble(s: State, run_id: str, req: AnalyzeRequest) -> AnalyzeResponse:
     at: AnswerType = s.get("answer_type", AnswerType.CLARIFICATION_NEEDED)
     res: SolveResult | None = s.get("result")
     # only a plan that passed validate_plan is shown; a rejected one returns no allocation, KPIs or recommendation
-    is_plan = res is not None and at != AnswerType.REFUSED and bool(s.get("plan_valid"))
+    is_plan = (res is not None and at != AnswerType.REFUSED and bool(s.get("plan_valid"))
+               and not s.get("aggregate_only"))
     text = s.get("blocked_reason") or s.get("text", "")
     recs: list[Recommendation] = []
     if is_plan and res.kpis:
