@@ -3,6 +3,7 @@
 services:
   api:
     build: .
+    image: hcl-allocation:dev
     network_mode: host
     env_file: .env
     environment:
@@ -13,6 +14,7 @@ services:
 
   ui:
     build: .
+    image: hcl-allocation:dev       # same image as api; the second build is fully cached
     network_mode: host
     env_file: .env
     environment:
