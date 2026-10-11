@@ -91,7 +91,7 @@ Orders are not split: one order, one plant, one week.
 | MIP gap | 0.5% | stop once within 0.5% of the proven optimum |
 | Time limit | 10 s main plan; 3 s per trade-off point and per counterfactual | latency targets: plan < 3 s, trade-off < 10 s |
 | Warm start | greedy plan: forced orders, then old-plan placements that still fit, then the rest at their best option that fits | gives SCIP a good plan at once |
-| Large models (> 600 options) | stop after SCIP's root node, then local search | measured: full branch-and-bound did not beat the root node in 20 s **[pack]** |
+| Large models (> 600 options) | stop after SCIP's root node, then local search | measured **[pack]**: a 30 s full search improves the objective by only about 1%, at 20x the time |
 | Portfolio | 2 warm starts (by due date, largest order first), 5 when re-planning (+ keep old placements, + two that ignore the old plan), run in parallel threads; keep the best | a re-plan seeded only from the old plan got stuck next to it |
 | Local search | relocate one order; or move an order into a full slot by ejecting another order to its best free option (or deferring it). Only strictly improving moves; respects capacity, forced orders and the carbon cap | packing at 89% utilisation is where MIP heuristics stall |
 | Memoisation | results cached on (table contents hash, arguments) | the graph and the trade-off ask for the same base plan |
@@ -100,7 +100,7 @@ Everything is **deterministic**: the root-node stop is a node limit, not a clock
 plan. When the plan isn't proven optimal, status is `FEASIBLE` and `notes` says how far it can be from the optimum,
 e.g. **[pack]** "within 3.1% of the solver's proven lower bound". The validator checks every plan independently.
 
-**[pack]** Why it is hard: 18,464 units of demand for 20,830 units of capacity (89%) in 4 weeks, orders of 50–300
+**[pack]** Why it is hard: 18,464 units of demand for 20,830 units of capacity (89%) in 4 weeks, orders of 41–258
 units into 28 capacity slots, with due dates. That is bin packing.
 
 ## 6. Trade-off frontier (`scenarios.tradeoff_frontier`)
@@ -159,7 +159,8 @@ The naive plan looks about 19,000 cheaper only because it isn't a real plan: it 
   **3,727 per tonne** (money only). 10% or more is not achievable within this pack's capacity. An earlier search
   found only 3.8% at 8,496 per tonne; the better search found a deeper, cheaper cut, so these are "best found"
   figures (lower bounds on what is achievable), not proven limits.
-- **Speed:** main plan 1.4 s, trade-off frontier 6.2 s, re-plan 3.9 s, "why" for 3 alternative plants 2.3 s.
+- **Speed:** main plan 1.4 s, trade-off frontier 6.2 s, re-plan 3.9 s, "why" for 3 alternative plants 2.3 s
+  (timings vary by about ±0.2 s from run to run; plans and all other numbers are deterministic).
 - **"Plant B loses 30%" for all 4 weeks:** 9 → 22 late orders, 1 deferred, 32 plant changes, cost 285,583 →
   282,841, validator ok. The loss takes 2,160 units out of a pack that only had 2,366 spare, so lateness rises.
 - **Late-drop drill** (E-3: Plant E −50%, 12–25 Oct; a dry run, not the real drop): 9 → 19 late, cost −1,682,
