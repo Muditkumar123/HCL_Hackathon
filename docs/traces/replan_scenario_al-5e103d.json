@@ -1,0 +1,146 @@
+{
+  "run_id": "al-5e103d",
+  "request": "Plant C is unavailable. Re-plan.",
+  "answer_type": "scenario",
+  "steps": [
+    {
+      "agent": "guard",
+      "tool": "input_guard",
+      "input": null,
+      "output": null,
+      "check": "pass; eligibility, capacity and delivery rules are also enforced by G2, the solver and validate_plan (defence in depth), so a G1 miss cannot produce an ineligible plan",
+      "duration_ms": 0.3,
+      "ts": "2026-10-11T09:24:26.985591Z"
+    },
+    {
+      "agent": "router",
+      "tool": "parse_intent",
+      "input": null,
+      "output": {
+        "intent": "replan",
+        "parsed_by": "llm",
+        "reason": "Plant C is unavailable."
+      },
+      "check": null,
+      "duration_ms": 641.7,
+      "ts": "2026-10-11T09:24:27.628305Z"
+    },
+    {
+      "agent": "guard",
+      "tool": "intent_guard",
+      "input": null,
+      "output": null,
+      "check": "pass (1 fixes)",
+      "duration_ms": 0.9,
+      "ts": "2026-10-11T09:24:27.630307Z"
+    },
+    {
+      "agent": "optimiser",
+      "tool": "solve_allocation(capacity_loss)+compare_plans",
+      "input": {
+        "capacity_changes": [
+          {
+            "plant": "C",
+            "capacity_loss_pct": 100.0,
+            "from_date": null,
+            "to_date": null,
+            "event_id": null
+          }
+        ]
+      },
+      "output": {
+        "status": "FEASIBLE",
+        "orders_moved": 33
+      },
+      "check": null,
+      "duration_ms": 16.6,
+      "ts": "2026-10-11T09:24:27.648050Z"
+    },
+    {
+      "agent": "checker",
+      "tool": "validate_plan",
+      "input": null,
+      "output": {
+        "capacity_ok": true,
+        "eligibility_ok": true,
+        "delivery_ok": false,
+        "violations": [
+          "O-007 arrives 1 days late at UK (flagged)",
+          "O-018 arrives 3 days late at BR (flagged)",
+          "O-019 arrives 1 days late at TR (flagged)",
+          "O-020 arrives 2 days late at FR (flagged)",
+          "O-028 arrives 1 days late at UK (flagged)",
+          "O-051 arrives 2 days late at FR (flagged)",
+          "O-052 arrives 1 days late at FR (flagged)",
+          "O-054 arrives 2 days late at DE (flagged)",
+          "O-064 arrives 2 days late at FR (flagged)",
+          "O-065 arrives 1 days late at FR (flagged)",
+          "O-071 arrives 1 days late at DE (flagged)",
+          "O-090 arrives 1 days late at IN (flagged)",
+          "O-096 arrives 1 days late at BR (flagged)",
+          "O-109 arrives 2 days late at ES (flagged)",
+          "O-110 arrives 2 days late at PL (flagged)",
+          "O-111 arrives 1 days late at US (flagged)",
+          "O-117 arrives 2 days late at BR (flagged)",
+          "O-120 arrives 1 days late at US (flagged)"
+        ]
+      },
+      "check": null,
+      "duration_ms": 70.9,
+      "ts": "2026-10-11T09:24:27.719287Z"
+    },
+    {
+      "agent": "writer",
+      "tool": "write_summary",
+      "input": {
+        "attempt": 1
+      },
+      "output": null,
+      "check": null,
+      "duration_ms": 1201.5,
+      "ts": "2026-10-11T09:24:28.921239Z"
+    },
+    {
+      "agent": "guard",
+      "tool": "faithfulness",
+      "input": null,
+      "output": {
+        "unmatched": [
+          "8",
+          "unsupported claim (plant C): 'To accommodate this change, orders previously assigned to Plant C have been reas'"
+        ]
+      },
+      "check": "faithfulness: fail (2 unsupported of 6 items checked)",
+      "duration_ms": 6.2,
+      "ts": "2026-10-11T09:24:28.928765Z"
+    },
+    {
+      "agent": "writer",
+      "tool": "write_summary",
+      "input": {
+        "attempt": 2
+      },
+      "output": null,
+      "check": null,
+      "duration_ms": 980.5,
+      "ts": "2026-10-11T09:24:29.911001Z"
+    },
+    {
+      "agent": "guard",
+      "tool": "faithfulness",
+      "input": null,
+      "output": {
+        "unmatched": []
+      },
+      "check": "faithfulness: pass (0 unsupported of 7 items checked)",
+      "duration_ms": 5.0,
+      "ts": "2026-10-11T09:24:29.917316Z"
+    }
+  ],
+  "llm_calls": 3,
+  "tokens": 3344,
+  "latency_ms": 2936.0,
+  "data_version": "e543801d",
+  "approval_status": "pending",
+  "created_at": "2026-10-11T09:24:29.919147Z"
+}

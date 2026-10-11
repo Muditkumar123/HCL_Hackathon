@@ -169,3 +169,17 @@ D/E power so a cut has a real cost.
 ### Late data drop
 The watcher for a new data/raw/capacity_events.csv was stopped on the user's side before any file arrived.
 `python -m scripts.late_drop data/raw/capacity_events.csv` is ready when it does.
+
+## Round 5: data pack frozen at v1 (team decision in QUEUE-shivang; confirmed by Shivang)
+- Pack v2 reverted (8e785f2). data/raw and data/app.db are back to v1, `data_version` e543801d (identical to before).
+- **For Ayush:** docs/solver.md (eba2dd4) now has the v2 numbers and calls v2 "frozen". The frozen pack is v1:
+  9 late, deepest cut 5.4% (+4,003, 3,727/t), 58% not at the cheapest plant, baseline 88 late / 3 overloaded
+  plant-weeks. All re-checked with the current code. Please restore the v1 numbers.
+- Eval on frozen v1 at eba2dd4 (clean worktree): team 24/24 in both configs; auditor 24/26 in both configs
+  (tradeoff-001 needs Codex's case change, see EVAL-NOTES.md; explain-001 is the base-plan weights bug for Mudit).
+  Plan validity and shown-text faithfulness 100% everywhere.
+- Traces re-collected on v1: allocation al-7f707c, re-plan "Plant C unavailable" al-5e103d (guard retry, then pass),
+  refused al-a9a496.
+- docs/DOCKER.md written; Dockerfile entrypoint path made absolute; one shared image for api and ui (0d483f3).
+- README: frozen-pack numbers only, two-suite eval table, 'AI-usage disclosure', 'Team contribution' and
+  'Declaration' left as empty headings.
