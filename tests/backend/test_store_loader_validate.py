@@ -45,13 +45,46 @@ def test_trace_roundtrip(db):
     assert db.get_trace("missing") is None
 
 
+def _plan(plant: str = "A") -> SolveResult:
+    a = OrderAssignment(order_id="O-1", plant=plant, cost=10, carbon_kg=1, due=date(2026, 10, 20), on_time=True)
+    return SolveResult(status="OPTIMAL", assignments=[a], solve_s=0.1, weights_used=Weights(),
+                       kpis=KPIs(total_cost=10, total_carbon_t=0.001, late_orders=0, plant_utilisation={"A": 0.1}))
+
+
 def test_latest_plan_roundtrip(db):
     assert db.latest_plan() is None
-    a = OrderAssignment(order_id="O-1", plant="A", cost=10, carbon_kg=1, due=date(2026, 10, 20), on_time=True)
-    res = SolveResult(status="OPTIMAL", assignments=[a], solve_s=0.1, weights_used=Weights(),
-                      kpis=KPIs(total_cost=10, total_carbon_t=0.001, late_orders=0, plant_utilisation={"A": 0.1}))
-    db.save_plan("al-1", res)
+    db.save_plan("al-1", _plan("A"))
     assert db.latest_plan().assignments[0].plant == "A"
+
+
+def test_latest_plan_ignores_plans_from_older_data(loaded):
+    v1 = loaded.load_dataset().data_version
+    loaded.save_plan("al-old", _plan("A"), data_version=v1)
+    assert loaded.latest_plan().assignments[0].plant == "A"
+    loader.load_csv("orders", (CSVS["orders"] + "O-9,P1,5,DE,2026-10-25\n").encode())   # late data drop
+    assert loaded.load_dataset().data_version != v1
+    assert loaded.latest_plan() is None                       # stale base plan is not reused
+    loaded.save_plan("al-new", _plan("B"))                    # default: current data_version
+    assert loaded.latest_plan().assignments[0].plant == "B"
+
+
+def test_init_db_migrates_old_plans_table(tmp_path: Path):
+    import sqlite3
+
+    from backend import store
+
+    path = tmp_path / "old.db"
+    with sqlite3.connect(path) as conn:
+        conn.execute("CREATE TABLE plans (run_id TEXT PRIMARY KEY, json TEXT NOT NULL, created_at TEXT NOT NULL)")
+        conn.execute("INSERT INTO plans VALUES ('al-x', ?, '2026-01-01')", (_plan().model_dump_json(),))
+    try:
+        store.init_db(str(path))
+        assert store.latest_plan() is None                    # unversioned legacy plan is never reused
+        store.save_plan("al-y", _plan("C"))
+        assert store.latest_plan().assignments[0].plant == "C"
+    finally:
+        store._db_path = None
+        store._invalidate()
 
 
 def test_loader_rejects_bad_values(db):

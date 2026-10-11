@@ -96,7 +96,7 @@ def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
         store.save_trace(trace)
         plan = _plan_from_response(resp, trace)
         if plan is not None:
-            store.save_plan(resp.run_id, plan)
+            store.save_plan(resp.run_id, plan, data_version=ds.data_version)
             log.info("analyze run_id=%s saved as base plan", resp.run_id)
     except Exception:  # the answer is still valid; only persistence failed
         log.exception("analyze run_id=%s could not save trace/plan", resp.run_id)
