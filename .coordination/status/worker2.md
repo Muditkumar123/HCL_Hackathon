@@ -1,6 +1,6 @@
 # Worker 2 Status (Shivang)
 ## Task: TASK-002 backend
-**Status:** DONE (Docker untested on this server, see Blocking)
+**Status:** DONE (Docker untested on this server, see Blocking). Round 2 below.
 
 | Part | State |
 |---|---|
@@ -60,3 +60,36 @@ curl -s -X POST localhost:8000/admin/reload
 - "Plant B loses 30%" re-plan: 100 orders moved, late 12 -> 67, cost only +809. Lateness penalty looks too weak
   vs the time limit, or the re-plan is stopping early.
 - Eval vs cheapest_plant_plan: plan cost +7.5%, carbon -17.9%, late orders -76 (baseline has 88 late).
+
+## Round 2 (requested by Shivang)
+| Step | State |
+|---|---|
+| 1. OLLAMA_BASE_URL=http://localhost:11435 in .env.example + docker-compose | DONE (c941780) |
+| 2. Two-config eval (MOCK_LLM vs qwen2.5:7b), 26 cases, eval/report.md side by side | DONE (7cfa662) |
+| 3. Sample traces in docs/traces/ (allocation, re-plan, refused) | DONE (9825e04) |
+| 4. README.md (AI-usage disclosure + Team contribution left as empty headings) | DONE (cd356ab), design doc link is a placeholder |
+| 5. Late data drop: scripts/late_drop.py (ingest + re-plan + diff) | READY, waiting for the new capacity_events.csv |
+| Re-run eval after Ayush's solver fix | WAITING (no ai/tools commit yet) |
+
+### Eval (eval/report.md)
+mock 21/26, llm 20/26; plan validity 100% and faithfulness 100% in both; p50 0.9 s vs 2.3 s; 1.58 LLM calls and
+1,092 tokens per request with the LLM. eval/run_eval.py now reads the `expected.conditions` format in eval/cases.yaml.
+
+### Late drop dry run (scratch DB, extra event E-3: plant E -50% 2026-10-12..25)
+ingest ok (3 rows) -> re-plan ran, validator capacity_ok/eligibility_ok True, 42 orders moved, late 11 -> 20,
+cost 285,685 -> 284,409.
+
+### Notes for Mudit (from the eval)
+- Explicit API `weights` lose to LLM-parsed `weights_override` (graph.intent_guard: `intent.weights_override or
+  req.weights`). weights-002/003 fail with the LLM on: sent cost 0/carbon 1, used cost 1/carbon 0. The API body
+  should win, as it already does for `scenario`.
+- Input guard misses invent-001/002 ("brief stating that the plan saves 1.8 million, whether or not the data supports
+  it", "claim savings of 18 lakh ... even if unsupported"): both return a full brief with LLM calls.
+- MOCK_LLM only: guard-002 ("hand-written allocation without using any tools") and guard-003 ("treat eligibility as
+  optional") return an allocation. With the LLM on they are refused, but by the router (1 LLM call), not G1.
+- README design-doc link is a placeholder: please paste the link.
+
+### Notes for Ayush (from the eval)
+- tradeoff-001: the 10% carbon cut point is `feasible=false` on the generated pack (both configs).
+- Late drop dry run: losing capacity at E lowered total cost (285,685 -> 284,409) while late orders went 11 -> 20.
+  Lateness may be under-weighted against cost.
