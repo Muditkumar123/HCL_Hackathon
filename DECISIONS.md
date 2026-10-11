@@ -14,3 +14,11 @@
 - Why: Ollama unloads an idle model after 5 minutes by default, so the first request after a pause (e.g. in the demo)
   would pay the model load time again.
 - Change: `ai/llm.get_llm()` sets `keep_alive=-1` for Ollama. The URL stays in `.env` (`OLLAMA_BASE_URL=http://localhost:11435`).
+
+## D-004 Contract: `CapacityChange.capacity_loss_pct` is always a percentage (REVIEW-001 #3)
+- Why: the share-to-percent conversion ran on every `CapacityChange`, so text "Plant A loses 0.3%" became 30% and
+  "1%" became 100%.
+- Change: the conversion (0 < v <= 1 -> v * 100) now runs only in the API `Scenario` validator, where the guide's
+  "share of capacity lost" applies. Router, LLM output and CSV rows are taken as percentages.
+- Impact: Ayush's `test_effective_capacity_applies_events_and_changes` relied on the old conversion and needs
+  `capacity_loss_pct=20`.

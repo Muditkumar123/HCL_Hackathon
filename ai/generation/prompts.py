@@ -30,6 +30,9 @@ HARD RULES:
 2. Do not use numbered lists.
 3. If FACTS lists late or unassigned orders, mention them.
 4. Do not invent plants, orders or reasons that are not in FACTS.
+5. Write every number as digits with its unit, copied from FACTS ("19,100", "3.2 t", "12%").
+   Never spell numbers as words.
+6. Do not rank or compare plants, recommend moves, or describe spare capacity unless FACTS says so.
 Plain, direct language. No jargon."""
 
 SUMMARY_USER = """REQUEST: {request}
@@ -45,5 +48,5 @@ Recommendation, Cost and Carbon, Delivery Risk, Trade-off, Decision Needed."""
 
 RETRY_SUFFIX = """
 
-Your previous answer used numbers that are NOT in FACTS: {bad_numbers}.
-Rewrite it using only numbers copied from FACTS."""
+Your previous answer had numbers or claims that are NOT supported by FACTS: {bad_numbers}.
+Rewrite it using only numbers, plants, orders and statements copied from FACTS."""

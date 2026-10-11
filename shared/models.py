@@ -105,7 +105,8 @@ class Weights(BaseModel):
 
 
 class CapacityChange(BaseModel):
-    """Same shape as a capacity_events.csv row (event_id optional)."""
+    """Same shape as a capacity_events.csv row (event_id optional). capacity_loss_pct is always a
+    percentage (0.3 means 0.3%); only the API Scenario accepts fractional shares (see DECISIONS.md D-004)."""
 
     model_config = ConfigDict(extra="ignore")
 
@@ -115,20 +116,11 @@ class CapacityChange(BaseModel):
     to_date: date | None = None
     event_id: str | None = None
 
-    @model_validator(mode="before")
-    @classmethod
-    def _fraction_to_pct(cls, data: Any) -> Any:
-        # Accept 0.3 as well as 30 (the guide only says "share of capacity lost").
-        if isinstance(data, dict):
-            v = data.get("capacity_loss_pct")
-            if isinstance(v, (int, float)) and 0 < v <= 1:
-                data = {**data, "capacity_loss_pct": float(v) * 100}
-        return data
-
 
 class Scenario(BaseModel):
     """Optional what-if passed to /analyze. Lenient on purpose: judges may send
-    either {"capacity_changes": [...]} or a single flat capacity-event object."""
+    either {"capacity_changes": [...]} or a single flat capacity-event object,
+    and a loss as a share (0.3) or a percentage (30)."""
 
     model_config = ConfigDict(extra="allow")
 
@@ -139,8 +131,19 @@ class Scenario(BaseModel):
     @classmethod
     def _wrap_flat_event(cls, data: Any) -> Any:
         if isinstance(data, dict) and "plant" in data and "capacity_changes" not in data:
-            return {"capacity_changes": [data]}
+            data = {"capacity_changes": [data]}
+        if isinstance(data, dict) and isinstance(data.get("capacity_changes"), list):
+            # API boundary only: the guide says "share of capacity lost", so 0 < v <= 1 is a share.
+            data = {**data, "capacity_changes": [_share_to_pct(c) for c in data["capacity_changes"]]}
         return data
+
+
+def _share_to_pct(change: Any) -> Any:
+    if isinstance(change, dict):
+        v = change.get("capacity_loss_pct")
+        if isinstance(v, (int, float)) and not isinstance(v, bool) and 0 < v <= 1:
+            return {**change, "capacity_loss_pct": float(v) * 100}
+    return change
 
 
 class AnalyzeRequest(BaseModel):

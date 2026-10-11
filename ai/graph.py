@@ -114,10 +114,12 @@ class State(TypedDict, total=False):
     changes: list[PlanChange]
     counterfactuals: list[CounterfactualResult]
     validator: ValidatorResult
+    plan_valid: bool
+    cut_infeasible: bool
     facts: dict
     mode: str
     text: str
-    bad_numbers: list[float]
+    bad_numbers: list[str]
     write_attempts: int
     faithful: bool
     used_template: bool
@@ -149,11 +151,8 @@ def pct(x: float) -> str:
     return f"{x * 100:.0f}%"
 
 
-def _scenario_numbers(req: AnalyzeRequest) -> set[float]:
-    if req.scenario is None:
-        return set()
-    nums = set(guards.extract_numbers(req.scenario.model_dump_json()))
-    return nums | {round(n * 100, 4) for n in nums if 0 < n <= 1}
+def _carbon_kg(res: SolveResult) -> float:
+    return sum(a.carbon_kg for a in res.assignments if a.plant is not None)
 
 
 def _order_plant(res: SolveResult, order_id: str) -> str | None:
@@ -181,14 +180,6 @@ def build_graph(deps: Deps):
     def parse_intent(s: State) -> dict:
         t0 = time.perf_counter()
         intent, tokens, used_llm = deps.parse_intent(s["cleaned"])
-        req = s["req"]
-        if req.scenario is not None:                       # explicit API scenario beats parsed text
-            if req.scenario.capacity_changes:
-                intent.capacity_changes = list(req.scenario.capacity_changes)
-                if intent.intent in (Intent.ALLOCATE, Intent.CLARIFY):
-                    intent.intent = Intent.REPLAN
-            if req.scenario.carbon_cut_pct is not None:
-                intent.carbon_cut_pct = req.scenario.carbon_cut_pct
         return {"intent": intent, "llm_calls": int(used_llm), "tokens": tokens,
                 "steps": _step("router", "parse_intent", t0,
                                output={"intent": intent.intent.value, "parsed_by": intent.parsed_by,
@@ -197,7 +188,9 @@ def build_graph(deps: Deps):
     # ---------------- G2
     def intent_guard(s: State) -> dict:
         t0 = time.perf_counter()
-        v, intent = guards.intent_guard(s["intent"], s["req"].request, _scenario_numbers(s["req"]), s["ds"])
+        v, intent = guards.intent_guard(s["intent"], s["cleaned"], s["ds"], s["req"].scenario)
+        # a weights_override survives G2 only if the request text asks for it ("cheapest", "weights"), so it is
+        # the user's more specific instruction; see .coordination/debates/DEBATE-001.md (#2)
         weights = intent.weights_override or s["req"].weights or Weights()
         out: dict = {"intent": intent, "weights": weights, "assumptions": v.notes,
                      "steps": _step("guard", "intent_guard", t0, check=v.check)}
@@ -239,9 +232,24 @@ def build_graph(deps: Deps):
         cut = s["intent"].carbon_cut_pct
         cuts = tuple(sorted(set(DEFAULT_CUTS) | ({cut} if cut is not None else set())))
         points = deps.frontier(ds, w, cuts=cuts)
-        return {"result": res, "tradeoff": points, "answer_type": AnswerType.SCENARIO, "mode": "summary",
-                "steps": _step("scenario", "tradeoff_frontier", t0, input={"cuts": list(cuts)},
-                               output={"points": len(points)})}
+        out: dict = {"result": res, "tradeoff": points, "answer_type": AnswerType.SCENARIO, "mode": "summary",
+                     "steps": _step("scenario", "tradeoff_frontier", t0, input={"cuts": list(cuts)},
+                                    output={"points": len(points)})}
+        if not cut:
+            return out
+        # a requested cut answers with that cut's own plan (validated by the checker), never the 0% plan
+        t1, point = time.perf_counter(), next((p for p in points if p.carbon_cut_pct == cut), None)
+        chosen = (deps.solve(ds, w, carbon_cap_kg=_carbon_kg(res) * (1 - cut / 100))
+                  if point is not None and point.feasible and res.kpis is not None else None)
+        if (chosen is not None and chosen.status in ("OPTIMAL", "FEASIBLE") and chosen.kpis is not None
+                and chosen.kpis.unassigned_orders <= res.kpis.unassigned_orders):   # no dropping orders to hit the cap
+            out.update(base=res, result=chosen, changes=deps.compare(ds, res, chosen))
+        else:  # infeasible cut: say so and keep the current plan as the closest valid plan
+            out.update(answer_type=AnswerType.INFEASIBLE, cut_infeasible=True,
+                       limitations=[f"A {cut:g}% carbon cut is not feasible; the current plan is shown."])
+        out["steps"] += _step("optimiser", "solve_allocation(carbon_cap)", t1, input={"carbon_cut_pct": cut},
+                              output={"status": chosen.status if chosen else "not run (cut infeasible)"})
+        return out
 
     def replan(s: State) -> dict:
         t0, ds, w, ch = time.perf_counter(), s["ds"], s["weights"], s["intent"].capacity_changes
@@ -277,9 +285,15 @@ def build_graph(deps: Deps):
         changes_in = s["intent"].capacity_changes
         v = deps.validate(ds, res.assignments, changes_in)
         at, lim = s["answer_type"], []
-        if res.status in ("INFEASIBLE", "ERROR") or not (v.capacity_ok and v.eligibility_ok):
-            at = AnswerType.INFEASIBLE
-            lim.append("The plan failed validation and is NOT a valid plan: " + "; ".join(v.violations[:5]))
+        valid = res.status not in ("INFEASIBLE", "ERROR") and v.capacity_ok and v.eligibility_ok
+        if not valid:  # the rejected plan is not shown at all (no allocation, KPIs or recommendation)
+            lim.append("The plan failed validation and is NOT a valid plan, so it is not shown: "
+                       + "; ".join(v.violations[:5]))
+            return {"validator": v, "plan_valid": False, "answer_type": AnswerType.INFEASIBLE,
+                    "limitations": lim + res.notes,
+                    "facts": {"answer_type": AnswerType.INFEASIBLE.value, "violations": v.violations[:5],
+                              "validator": {"capacity_ok": v.capacity_ok, "eligibility_ok": v.eligibility_ok}},
+                    "steps": _step("checker", "validate_plan", t0, output=v.model_dump())}
         k = res.kpis
         if k and k.unassigned_orders:
             at = AnswerType.INFEASIBLE
@@ -289,14 +303,16 @@ def build_graph(deps: Deps):
                 at = AnswerType.INFEASIBLE
             late_ids = [a.order_id for a in res.assignments if not a.on_time][:10]
             lim.append(f"{k.late_orders} orders cannot meet their due date in this plan: {', '.join(late_ids)}.")
-        return {"validator": v, "answer_type": at, "limitations": lim + res.notes, "facts": _facts(s, v),
+        return {"validator": v, "plan_valid": True, "answer_type": at, "limitations": lim + res.notes,
+                "facts": _facts({**s, "answer_type": at}, v),
                 "steps": _step("checker", "validate_plan", t0, output=v.model_dump())}
 
     # ---------------- writer + G4 with bounded retry
     def write(s: State) -> dict:
         t0 = time.perf_counter()
         attempts = s.get("write_attempts", 0) + 1
-        text, tokens = deps.write(s["req"].request, s["answer_type"], s["facts"], s["mode"], s.get("bad_numbers"))
+        # the writer sees the PII-masked request, never the raw one
+        text, tokens = deps.write(s["cleaned"], s["answer_type"], s["facts"], s["mode"], s.get("bad_numbers"))
         if text is None:  # MOCK_LLM or LLM down: deterministic text, faithful by construction
             return {"text": guards.template_summary(s["answer_type"], s["facts"]), "used_template": True,
                     "write_attempts": attempts, "steps": _step("writer", "template_summary", t0)}
@@ -308,8 +324,8 @@ def build_graph(deps: Deps):
         t0 = time.perf_counter()
         if s.get("used_template"):
             return {"faithful": True, "steps": _step("guard", "faithfulness", t0, check="template: pass by construction")}
-        ok, bad, n = guards.check_faithfulness(s["text"], s["facts"], s["req"].request)
-        check = f"faithfulness: {'pass' if ok else 'fail'} ({n - len(bad)}/{n} numbers matched)"
+        ok, bad, n = guards.check_faithfulness(s["text"], s["facts"], s["cleaned"])
+        check = f"faithfulness: {'pass' if ok else 'fail'} ({len(bad)} unsupported of {n} items checked)"
         return {"faithful": ok, "bad_numbers": bad, "steps": _step("guard", "faithfulness", t0,
                                                                      check=check, output={"unmatched": bad})}
 
@@ -361,6 +377,12 @@ def _facts(s: State, v: ValidatorResult) -> dict:
                      "late_orders": k.late_orders, "unassigned_orders": k.unassigned_orders,
                      "plant_utilisation": {p: pct(u) for p, u in k.plant_utilisation.items()}}
         f["late_order_ids"] = [a.order_id for a in res.assignments if not a.on_time][:10]
+    it = s["intent"]
+    if it.capacity_changes:  # grounded (G2) or API-given request parameters: the writer may restate them
+        f["capacity_changes"] = [{"plant": c.plant, "capacity_loss": f"{c.capacity_loss_pct:g}%",
+                                  "from": c.from_date.isoformat() if c.from_date else "start of horizon",
+                                  "to": c.to_date.isoformat() if c.to_date else "end of horizon"}
+                                 for c in it.capacity_changes]
     if s.get("changes") is not None and s.get("base") is not None and s["base"].kpis and res.kpis:
         b = s["base"].kpis
         f["changes_count"] = len(s["changes"])
@@ -370,18 +392,7 @@ def _facts(s: State, v: ValidatorResult) -> dict:
         f["moved"] = [{"order_id": c.order_id, "from": c.from_plant, "to": c.to_plant, "reason": c.reason}
                       for c in s["changes"][:10]]
     if s.get("tradeoff"):
-        pts = s["tradeoff"]
-        zero = next((p for p in pts if p.carbon_cut_pct == 0), pts[0])
-        rows = [{"carbon_cut_pct": f"{p.carbon_cut_pct:g}%", "cost": money(p.cost),
-                 "cost_delta": signed_money(p.cost - zero.cost), "carbon": f"{p.carbon_t:,.1f} t",
-                 "late_orders": p.late_orders, "feasible": p.feasible,
-                 "implied_carbon_price_per_t": (money(p.implied_carbon_price_per_t)
-                                                if p.implied_carbon_price_per_t is not None else "n/a")}
-                for p in pts]
-        f["tradeoff"] = rows
-        cut = s["intent"].carbon_cut_pct
-        if cut is not None:
-            f["tradeoff_row"] = next((r for r, p in zip(rows, pts) if p.carbon_cut_pct == cut), None)
+        f.update(_tradeoff_facts(s))
     if s.get("counterfactuals"):
         oid = s["intent"].order_id
         chosen = _order_plant(res, oid)
@@ -395,6 +406,38 @@ def _facts(s: State, v: ValidatorResult) -> dict:
                         "displaced_orders": [d.order_id for d in c.displaced_orders]})
         f["order_id"], f["chosen_plant"], f["counterfactuals"] = oid, chosen, cfs
         f["explanation"] = _explain_sentence(oid, chosen, s["counterfactuals"])
+    return f
+
+
+def _tradeoff_facts(s: State) -> dict:
+    """Infeasible frontier points carry sentinel values (cost 0), so they are never formatted as numbers."""
+    pts, res, cut = s["tradeoff"], s["result"], s["intent"].carbon_cut_pct
+    zero = next((p for p in pts if p.carbon_cut_pct == 0 and p.feasible), None)
+    rows = []
+    for p in pts:
+        if not p.feasible:
+            rows.append({"carbon_cut_pct": f"{p.carbon_cut_pct:g}%", "feasible": False})
+            continue
+        rows.append({"carbon_cut_pct": f"{p.carbon_cut_pct:g}%", "feasible": True, "cost": money(p.cost),
+                     "cost_delta": signed_money(p.cost - zero.cost) if zero else "n/a",
+                     "carbon": f"{p.carbon_t:,.1f} t", "late_orders": p.late_orders,
+                     "implied_carbon_price_per_t": (money(p.implied_carbon_price_per_t)
+                                                    if p.implied_carbon_price_per_t is not None else "n/a")})
+    f: dict[str, Any] = {"tradeoff": rows}
+    feasible_cuts = [p.carbon_cut_pct for p in pts if p.feasible]
+    if feasible_cuts:
+        f["deepest_feasible_cut"] = f"{max(feasible_cuts):g}%"
+    if cut is None:
+        return f
+    if s.get("cut_infeasible"):
+        f["tradeoff_row"] = {"carbon_cut_pct": f"{cut:g}%", "feasible": False}
+    elif s.get("base") is not None and s["base"].kpis and res.kpis:   # the cut's own validated plan
+        b, k = s["base"].kpis, res.kpis
+        f["tradeoff_row"] = {"carbon_cut_pct": f"{cut:g}%", "feasible": True, "cost": money(k.total_cost),
+                             "cost_delta": signed_money(k.total_cost - b.total_cost),
+                             "carbon": f"{k.total_carbon_t:,.1f} t", "late_orders": k.late_orders}
+    else:
+        f["tradeoff_row"] = next((r for r, p in zip(rows, pts) if p.carbon_cut_pct == cut), None)
     return f
 
 
@@ -418,17 +461,18 @@ def _explain_sentence(oid: str, chosen: str | None, cfs: list[CounterfactualResu
 # ============================================================ entry point (called by backend /analyze)
 def run(req: AnalyzeRequest, ds: Dataset, deps: Deps | None = None) -> tuple[AnalyzeResponse, TraceRecord]:
     t0 = time.perf_counter()
-    graph = (deps or _default()).graph()
     run_id = new_run_id()
-    try:
+    try:  # dependency import and graph compile are inside the boundary too (REVIEW-001 #8)
+        graph = (deps or _default()).graph()
         s: State = graph.invoke({"req": req, "ds": ds, "run_id": run_id, "steps": [], "llm_calls": 0,
                                  "tokens": 0, "assumptions": [], "limitations": []})
+        resp = _assemble(s, run_id, req)
     except Exception as exc:  # never leak a traceback to the user; the trace keeps the error
         log.exception("graph failed run_id=%s", run_id)
         s = {"answer_type": AnswerType.INFEASIBLE, "blocked_reason": f"Internal error: {type(exc).__name__}. See trace.",
              "steps": [TraceStep(agent="system", tool="graph", check=f"error: {exc}")], "llm_calls": 0, "tokens": 0,
              "assumptions": [], "limitations": []}
-    resp = _assemble(s, run_id, req)
+        resp = _assemble(s, run_id, req)
     trace = TraceRecord(run_id=run_id, request=req.request, answer_type=resp.answer_type, steps=s.get("steps", []),
                         llm_calls=s.get("llm_calls", 0), tokens=s.get("tokens", 0),
                         latency_ms=round((time.perf_counter() - t0) * 1000, 1), data_version=ds.data_version,
@@ -440,7 +484,8 @@ def _assemble(s: State, run_id: str, req: AnalyzeRequest) -> AnalyzeResponse:
     """G5: code (not the LLM) assembles every structured field; approval is always required for plans."""
     at: AnswerType = s.get("answer_type", AnswerType.CLARIFICATION_NEEDED)
     res: SolveResult | None = s.get("result")
-    is_plan = res is not None and at != AnswerType.REFUSED
+    # only a plan that passed validate_plan is shown; a rejected one returns no allocation, KPIs or recommendation
+    is_plan = res is not None and at != AnswerType.REFUSED and bool(s.get("plan_valid"))
     text = s.get("blocked_reason") or s.get("text", "")
     recs: list[Recommendation] = []
     if is_plan and res.kpis:
@@ -463,8 +508,9 @@ def _assemble(s: State, run_id: str, req: AnalyzeRequest) -> AnalyzeResponse:
     return AnalyzeResponse(
         run_id=run_id, answer_type=at, summary=text if at != AnswerType.BRIEF else text.split("\n")[0][:300],
         allocation=res.assignments if is_plan else [], kpis=res.kpis if is_plan else None,
-        tradeoff=s.get("tradeoff", []), changes=s.get("changes") or [], weights_used=weights,
-        validator=s.get("validator"), recommendations=recs, counterfactuals=s.get("counterfactuals", []),
+        tradeoff=s.get("tradeoff", []), changes=(s.get("changes") or []) if is_plan else [], weights_used=weights,
+        validator=s.get("validator"), recommendations=recs,
+        counterfactuals=s.get("counterfactuals", []) if is_plan else [],
         brief=text if at == AnswerType.BRIEF else None,
         faithfulness_ok=s.get("faithful"), approval_status="pending" if is_plan else "not_required",
         assumptions=[f"Weights: cost {pct(weights.cost)}, carbon {pct(weights.carbon)}, lateness x{weights.lateness:g}"]

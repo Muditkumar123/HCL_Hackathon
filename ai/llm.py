@@ -40,10 +40,14 @@ def _tokens(msg: Any) -> int:
 
 def call_structured(system: str, user: str, schema: type[BaseModel]) -> tuple[BaseModel | None, int]:
     """Constrained JSON output (Ollama/vLLM enforce the schema). 1 retry, then None -> caller falls back."""
-    llm = get_llm()
-    if llm is None:
+    try:  # provider, config and import errors must also reach the deterministic fallback
+        llm = get_llm()
+        if llm is None:
+            return None, 0
+        runnable = llm.with_structured_output(schema, method="json_schema", include_raw=True)
+    except Exception as exc:
+        log.warning("LLM unavailable for structured call: %s", exc)
         return None, 0
-    runnable = llm.with_structured_output(schema, method="json_schema", include_raw=True)
     for attempt in range(2):
         try:
             out = runnable.invoke([("system", system), ("user", user)])
@@ -56,10 +60,10 @@ def call_structured(system: str, user: str, schema: type[BaseModel]) -> tuple[Ba
 
 
 def call_text(system: str, user: str) -> tuple[str | None, int]:
-    llm = get_llm()
-    if llm is None:
-        return None, 0
     try:
+        llm = get_llm()
+        if llm is None:
+            return None, 0
         msg = llm.invoke([("system", system), ("user", user)])
         return str(msg.content), _tokens(msg)
     except Exception as exc:
