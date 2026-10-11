@@ -69,7 +69,7 @@ curl -s -X POST localhost:8000/admin/reload
 | 3. Sample traces in docs/traces/ (allocation, re-plan, refused) | DONE (9825e04) |
 | 4. README.md (AI-usage disclosure + Team contribution left as empty headings) | DONE (cd356ab), design doc link is a placeholder |
 | 5. Late data drop: scripts/late_drop.py (ingest + re-plan + diff) | READY, waiting for the new capacity_events.csv |
-| Re-run eval after Ayush's solver fix | WAITING (no ai/tools commit yet) |
+| Re-run eval after Ayush's solver fix (60f8679) | DONE: mock 21/26, llm 20/26 (same cases fail); p50 1.1 s / 2.7 s |
 
 ### Eval (eval/report.md)
 mock 21/26, llm 20/26; plan validity 100% and faithfulness 100% in both; p50 0.9 s vs 2.3 s; 1.58 LLM calls and
@@ -93,3 +93,16 @@ cost 285,685 -> 284,409.
 - tradeoff-001: the 10% carbon cut point is `feasible=false` on the generated pack (both configs).
 - Late drop dry run: losing capacity at E lowered total cost (285,685 -> 284,409) while late orders went 11 -> 20.
   Lateness may be under-weighted against cost.
+
+### After Ayush's fix (60f8679)
+- Eval re-run: same pass counts and the same failing cases; the remaining failures are the guard/weights issues
+  for Mudit above, plus tradeoff-001 (10% cut infeasible on this pack; deepest achievable cut 3.8%).
+  "B loses 30%" re-plan: late 20 (mock) / 25 (llm), was 67.
+- Fixed on my side: tests/backend/conftest.py made `from conftest import synthetic_ds` in tests/tools resolve to the
+  wrong module depending on collection order. My fixtures now live in tests/backend/backend_fixtures.py (no conftest).
+- For Ayush: `tests/tools/test_tools.py::test_effective_capacity_applies_events_and_changes` fails even when run alone
+  (`pytest tests/tools`): obtained 998.0, expected 800.
+- For Mudit: tests/test_graph_guards.py has 255 uncommitted lines of new review1 tests; 58 of them fail right now
+  (expected while the fixes are in progress).
+- Open question for the team: tradeoff-001 expects a feasible 10% cut. Either change the case to the deepest
+  achievable cut, or I give the generated pack more capacity headroom (it changes every number in the README and traces).

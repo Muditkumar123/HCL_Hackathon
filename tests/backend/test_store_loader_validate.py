@@ -1,3 +1,4 @@
+# ruff: noqa: F811  (test arguments shadow the fixtures imported from backend_fixtures, which is how pytest finds them)
 """Unit tests for backend.store, backend.loader and backend.validate_data."""
 
 from __future__ import annotations
@@ -8,7 +9,7 @@ from pathlib import Path
 import pandas as pd
 
 from backend import loader, validate_data
-from backend_csvs import CSVS
+from backend_fixtures import CSVS, db, loaded  # noqa: F401 (pytest fixtures, imported by name)
 from shared.models import KPIs, OrderAssignment, SolveResult, TraceRecord, Weights
 
 

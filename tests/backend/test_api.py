@@ -1,10 +1,11 @@
+# ruff: noqa: F811  (test arguments shadow the fixtures imported from backend_fixtures, which is how pytest finds them)
 """API tests with FastAPI TestClient. Run: MOCK_LLM=true pytest tests/backend -q"""
 
 from __future__ import annotations
 
 import json
 
-from backend_csvs import CSVS, ORDERS
+from backend_fixtures import CSVS, ORDERS, client, db  # noqa: F401 (pytest fixtures, imported by name)
 
 
 def _ingest(client, table: str, text: str, **meta):
