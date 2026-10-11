@@ -132,3 +132,40 @@ cost 285,685 -> 284,409.
   guard-002/003 in MOCK_LLM.
 - Ayush had uncommitted edits in ai/tools/solver.py during this run, so I ran the eval from a clean worktree at
   HEAD. I'll re-run when he commits.
+
+## Round 4 (requested by Shivang)
+| Item | State |
+|---|---|
+| 1. Data-robust carbon-cut cases: trade-01/03/04 pass if (feasible AND cost up AND carbon down) OR (infeasible AND summary quotes the deepest feasible cut) | DONE (968bd4e). Same rule suggested for auditor tradeoff-001 in .coordination/reviews/EVAL-NOTES.md |
+| 2. Pack v2 (our generated data is the only pack on the server): spare capacity + green-tariff D/E at a 10-12% premium | DONE (ef68ace). Deepest feasible cut 14.5%, 10% costs +6,800, 15%+ infeasible; all traps verified |
+| README numbers, 3 traces, both eval configs at ef68ace (after Ayush's c446af9 and Mudit's 532db06) | DONE |
+| Base plans keyed by weights: `latest_plan(weights=None)` | DONE (backend; graph must pass weights) |
+
+Capacity alone could not do it: even with C at 700 units/week, an LP relaxation capped the cut at 9.2%, because
+B/D/E were barely cleaner than A and the 70/30 base already used the cheap clean capacity. v2 adds cleaner, pricier
+D/E power so a cut has a real cost.
+
+### Eval at ef68ace, pack v2
+| | Team mock | Team llm | Auditor mock | Auditor llm |
+|---|---|---|---|---|
+| Passed | 24/24 | 24/24 | 24/26 | 24/26 |
+| Text from template (LLM drafts rejected twice) | 100% | 17% (3) | 100% | 25% (4) |
+
+### For Mudit
+- **Base plan vs weights (auditor explain-001, LLM run fails).** `explain` and `replan` use `deps.base_plan()`
+  whatever weights it was solved with. In the LLM run the latest base was weights-003 (cost only, lateness 0),
+  so "why O-001" explained a plan with O-001 late at A, while the counterfactuals used default weights.
+  `backend.store.latest_plan(weights)` now filters by weights; please call `deps.base_plan(w)` in ai/graph.py.
+- Claim check false positive: alloc-01 LLM text "Plant C is operating at 95% utilization, which is the highest among
+  all plants" was rejected, but it is true on v2 (C 0.948, next E 0.870).
+- MOCK_LLM: guard-002/003 still return an allocation (rules router). LLM: guard-002 refused by the router (1 LLM
+  call), not by G1.
+
+### For Ayush
+- docs/solver.md headline numbers marked [pack] are from pack v1 (5.4% deepest cut, 9 late). On v2: main plan
+  0 late, cost 311,029, carbon 12.9 t; deepest cut 14.5%.
+- Earlier, on v1, the 5% cut point flipped between feasible and infeasible across runs (3 s point solves).
+
+### Late data drop
+The watcher for a new data/raw/capacity_events.csv was stopped on the user's side before any file arrived.
+`python -m scripts.late_drop data/raw/capacity_events.csv` is ready when it does.

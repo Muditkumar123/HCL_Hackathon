@@ -1,0 +1,123 @@
+{
+  "run_id": "al-52d447",
+  "request": "Allocate this week's orders",
+  "answer_type": "allocation",
+  "steps": [
+    {
+      "agent": "guard",
+      "tool": "input_guard",
+      "input": null,
+      "output": null,
+      "check": "pass",
+      "duration_ms": 5.4,
+      "ts": "2026-10-11T09:13:26.475901Z"
+    },
+    {
+      "agent": "router",
+      "tool": "parse_intent",
+      "input": null,
+      "output": {
+        "intent": "allocate",
+        "parsed_by": "llm",
+        "reason": "User wants to see or build the allocation plan for this week's orders."
+      },
+      "check": null,
+      "duration_ms": 3183.1,
+      "ts": "2026-10-11T09:13:29.659666Z"
+    },
+    {
+      "agent": "guard",
+      "tool": "intent_guard",
+      "input": null,
+      "output": null,
+      "check": "pass",
+      "duration_ms": 1.2,
+      "ts": "2026-10-11T09:13:29.662768Z"
+    },
+    {
+      "agent": "optimiser",
+      "tool": "solve_allocation",
+      "input": {
+        "weights": {
+          "cost": 0.7,
+          "carbon": 0.3,
+          "lateness": 1.0
+        },
+        "require_all_on_time": false
+      },
+      "output": {
+        "status": "FEASIBLE",
+        "solve_s": 1.493
+      },
+      "check": null,
+      "duration_ms": 1598.2,
+      "ts": "2026-10-11T09:13:31.262319Z"
+    },
+    {
+      "agent": "checker",
+      "tool": "validate_plan",
+      "input": null,
+      "output": {
+        "capacity_ok": true,
+        "eligibility_ok": true,
+        "delivery_ok": true,
+        "violations": []
+      },
+      "check": null,
+      "duration_ms": 75.1,
+      "ts": "2026-10-11T09:13:31.338691Z"
+    },
+    {
+      "agent": "writer",
+      "tool": "write_summary",
+      "input": {
+        "attempt": 1
+      },
+      "output": null,
+      "check": null,
+      "duration_ms": 944.6,
+      "ts": "2026-10-11T09:13:32.283820Z"
+    },
+    {
+      "agent": "guard",
+      "tool": "faithfulness",
+      "input": null,
+      "output": {
+        "unmatched": [
+          "unsupported claim (plant C): 'Plant C is operating at 95% utilization, which is the highest among all plants.'"
+        ]
+      },
+      "check": "faithfulness: fail (1 unsupported of 4 items checked)",
+      "duration_ms": 1.0,
+      "ts": "2026-10-11T09:13:32.285704Z"
+    },
+    {
+      "agent": "writer",
+      "tool": "write_summary",
+      "input": {
+        "attempt": 2
+      },
+      "output": null,
+      "check": null,
+      "duration_ms": 876.9,
+      "ts": "2026-10-11T09:13:33.163170Z"
+    },
+    {
+      "agent": "guard",
+      "tool": "faithfulness",
+      "input": null,
+      "output": {
+        "unmatched": []
+      },
+      "check": "faithfulness: pass (0 unsupported of 10 items checked)",
+      "duration_ms": 1.3,
+      "ts": "2026-10-11T09:13:33.165713Z"
+    }
+  ],
+  "llm_calls": 3,
+  "tokens": 1376,
+  "latency_ms": 6764.5,
+  "data_version": "006f981d",
+  "approval_status": "pending",
+  "created_at": "2026-10-11T09:13:33.167561Z"
+}
