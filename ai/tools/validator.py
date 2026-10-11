@@ -61,7 +61,15 @@ def _validate(ds: Dataset, plan: list[OrderAssignment], changes: list[CapacityCh
         o = orders.get(a.order_id)
         if o is None:
             continue
+        # plan fields are claims: every one must be finite and match the source / the recomputation (REVIEW-003 #4)
+        due = to_date(o.due)
+        if a.due != due:
+            elig.append(f"{a.order_id} due {a.due} does not match orders.csv due {due}")
+        if not (math.isfinite(a.cost) and math.isfinite(a.carbon_kg)):
+            elig.append(f"{a.order_id} has a non-finite cost or carbon ({a.cost}, {a.carbon_kg})")
         if a.plant is None:
+            if (a.cost, a.carbon_kg, a.production_week, a.arrival, a.on_time, a.days_late) != (0, 0, None, None, False, 0):
+                elig.append(f"{a.order_id} is unassigned but carries cost, carbon, dates or an on-time claim")
             late.append(f"{a.order_id} is unassigned (no capacity)")
             continue
         product, dest, qty = str(o.product), str(o.destination), float(o.qty)
@@ -69,6 +77,11 @@ def _validate(ds: Dataset, plan: list[OrderAssignment], changes: list[CapacityCh
         if week is None:
             elig.append(f"{a.order_id} at plant {a.plant} has no production week")
             continue
+        if week.weekday() != 0:
+            elig.append(f"{a.order_id} production week {week} is not a Monday")
+            week = monday(week)  # count its load in its real week, so a mid-week date cannot dodge the capacity check
+        if a.arrival is None:
+            elig.append(f"{a.order_id} at plant {a.plant} has no arrival date")
         if week < week0:
             elig.append(f"{a.order_id} is produced in week {week} before planning starts ({week0})")
         prow = plant_rows.get((a.plant, product, week if has_week_column(ds) else None))
@@ -93,7 +106,6 @@ def _validate(ds: Dataset, plan: list[OrderAssignment], changes: list[CapacityCh
 
         # recompute delivery
         arrival = week + timedelta(days=6 + math.ceil(transit))
-        due = to_date(o.due)
         days_late = max(0, (arrival - due).days)
         if a.arrival is not None and a.arrival != arrival:
             elig.append(f"{a.order_id} arrival {a.arrival} does not match recomputed {arrival}")

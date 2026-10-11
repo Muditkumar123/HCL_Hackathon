@@ -71,7 +71,19 @@ problem (answer to Shivang's "lateness may be under-weighted" note).
    (b) late order-days (a deferral counted as 12) no worse than that. It runs on trap, synthetic, real pack B −30%,
    and E-3.
 
+### REVIEW-003 (Codex, RED) — done by 15:15, timebox 15:40
+| # | Finding | Result |
+|---|---|---|
+| 4 | Validator bypasses (NaN cost/carbon; arrival None + forged due 2099; split-week 600+600 at A) | **Fixed**: all plan fields checked as claims (finite, due = orders.csv, arrival required, Monday weeks counted in their Monday's week, canonical unassigned rows). 4 tests with Codex's inputs |
+| 3 | Frontier "infeasible" was not a proof | **Fixed**: capped solves cannot defer more orders than the 0% plan, so SCIP INFEASIBLE is a certificate. Frozen pack: **8%+ proven impossible** (0.2 s, LP); 5.4–8% "not found". Feasible points now carry their `plan` (D-007) |
+| 6 | Same-plant week moves dropped from the diff | **Fixed** + test |
+| 1, 2, 5 | Avoidable lateness (1-day probe), defer penalty leaves a feasible order unplanned, move penalty > 1 late day at 101 moves | **Documented** in `docs/solver.md` §11 with Codex's numbers and the fix (lexicographic: deferrals, then delivery, then cost/carbon/moves). Not done: needs a two-stage solve and re-measuring every number, > 15 min |
+
 ### Needs action from others
+- **Mudit (`shared/models.py`, REVIEW-003 #3):** please add `proven: bool = True` to `TradeoffPoint`. The frontier
+  already fills it when the field exists (True: plan found, or SCIP proved the cap impossible; False: not found in
+  the time limit). Wording: proven → "a 10% cut is not possible within capacity"; not proven → "no plan found for X%;
+  the best found is Y%". On the frozen pack, 10%+ is proven, so today's "not feasible" text is correct.
 - **Mudit (`ai/graph.py`):** `replan` could call `compare(ds, base, new, changes=ch)` so each reason starts with
   "Plant B loses 30% capacity."; `allocate` could pass `forced=it.force_assignments`. Both are optional keyword args.
 - **Mudit:** the infeasible-cut wording ("not feasible ... deepest feasible cut is 5.4%") is in your working copy and

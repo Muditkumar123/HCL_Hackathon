@@ -69,9 +69,10 @@ Orders are not split: one order, one plant, one week.
 - **Normalisation.** Dividing by `C_ref` and `K_ref` makes both terms about 1.0, so the weights mean what they say:
   0.7/0.3 (the default) really is "cost matters about twice as much as carbon", whatever the units. The trade-off
   table reports the implied carbon price, so management sees the default's meaning in money per tonne.
-- **Lateness dominates.** One late order-day costs 0.01, which is 1% of the normalised cost term at weight 1.
-  **[pack]** That is about 3,800 of money per late day (C_ref = 266,355; weight 0.7). An average order costs about
-  2,400 in total, so the plan never makes an order late to save money on it.
+- **Lateness weighs heavily, but it is not a strict priority.** One late order-day costs 0.01, which is 1% of the
+  normalised cost term at weight 1. **[pack]** That is about 3,800 of money per late day (C_ref = 266,355; weight
+  0.7), more than an average order's whole cost (about 2,400). An order whose late option saves more than that can
+  still be made late, and on small plans the threshold is low (see section 11).
 - **Deferral penalty, and why it changed.** The first version charged a flat 1,000 per deferred order (a "big-M").
   That equals about 100,000 late order-days, so the solver would make dozens of orders late just to squeeze one more
   order into the horizon. Shivang's eval caught it: "Plant B loses 30%" pushed late orders from 12 to 67. Now
@@ -79,7 +80,8 @@ Orders are not split: one order, one plant, one week.
   always worse than producing late, but only by about what it really means: the order ships at least a week later.
   The same "B loses 30%" re-plan now has **[pack]** 22 late orders and 1 deferral.
 - **Minimal change.** When re-planning, every order moved off its old plant costs 0.0001, so 100 moves weigh as much
-  as one late day. It only breaks near-ties in favour of a stable plan; it never buys stability with lateness. The
+  as one late day. It breaks near-ties in favour of a stable plan; with more than 100 moves it could buy one late day
+  (section 11). The
   "why" counterfactual uses 0.01 per move instead (section 7).
 - A 1e-7 per-week tie-break prefers earlier production among exact ties, so equal plans come out the same every time.
 
@@ -114,14 +116,19 @@ for each cut *c*.
 3. Each point keeps the best plan among its own solve and every deeper feasible one, so the curve is monotone.
 4. The **deepest feasible cut is always an explicit point** (the feasible point with the largest cut). Every cut
    beyond it has `feasible=False`, so the answer can be "a 10% cut isn't achievable within capacity; the best is
-   X% at +Y and Z late orders".
+   X% at +Y and Z late orders". Each feasible point carries its own plan (`plan`, DECISIONS.md D-007), so a
+   requested cut is answered with exactly the plan behind its row.
+   **"Not found" vs "impossible":** the capped solves may not defer more orders than the 0% plan, so when SCIP
+   returns INFEASIBLE for a cap that is a proof (usually from the LP relaxation, in 0.2 s). A cap that only fails to
+   find a plan within 3 s is "not found", not proven impossible. **[pack]** SCIP proves every cut of 8% or more
+   impossible; between the best found 5.4% and 8% is unproven.
 5. `implied_carbon_price_per_t = (cost_c − cost_0) / (carbon_0 − carbon_c)` in tonnes, versus the 0% point.
    It counts money only; the point also reports its late orders.
 
 ## 7. Re-plan and "why" (counterfactual)
 
 - **Re-plan** (`solve_allocation(..., changes=..., base_plan=old)`) re-solves the whole plan with the new capacity,
-  preferring the old placements; `compare_plans` lists every order whose plant or on-time status changed, with a
+  preferring the old placements; `compare_plans` lists every order whose plant, week or on-time status changed, with a
   reason built by code (capacity loss, load in its old week before → after, cost and carbon change, lateness).
 - **Why is order X at plant P?** For each other eligible plant Q we re-solve the **whole** plan with X forced to Q.
   We report X's own cost difference and the whole-plan cost and carbon difference, plus the knock-on: which other
@@ -136,7 +143,10 @@ for each cut *c*.
 Independent: it doesn't import the solver or the cost model's pricing and capacity code. It recomputes each order's
 eligibility, route, cost, carbon (within 0.01) and arrival from the raw tables, and re-adds every capacity loss. It
 flags every order missing or duplicated, every overload, and every late or deferred order (late orders are flagged,
-never hidden).
+never hidden). Every field in the plan is treated as a claim (REVIEW-003): cost and carbon must be finite, `due` must
+equal orders.csv, an assigned order must have an arrival date, the production week must be a Monday (a mid-week date
+is counted in its Monday's week, so it cannot dodge the capacity check), and a deferred row must carry no cost,
+carbon, dates or on-time claim.
 
 ## 9. Headline numbers [pack]
 
@@ -156,9 +166,9 @@ The naive plan looks about 19,000 cheaper only because it isn't a real plan: it 
   would be a wrong explanation; that is why "why" answers re-solve the whole plan. (59% in the earlier run of the
   same pack; the plan improved when the warm-start portfolio was added.)
 - **Carbon: the deepest achievable cut is 5.4%** (19.8 → 18.7 t) at +4,003 cost and 49 late orders: an implied
-  **3,727 per tonne** (money only). 10% or more is not achievable within this pack's capacity. An earlier search
-  found only 3.8% at 8,496 per tonne; the better search found a deeper, cheaper cut, so these are "best found"
-  figures (lower bounds on what is achievable), not proven limits.
+  **3,727 per tonne** (money only). **SCIP proves that 8% or more is impossible** within this pack's capacity
+  (without deferring orders); 5.4% to 8% is unproven. An earlier search found only 3.8% at 8,496 per tonne; the
+  better search found a deeper, cheaper cut, so 5.4% is a "best found" figure, not a proven limit.
 - **Speed:** main plan 1.4 s, trade-off frontier 6.2 s, re-plan 3.9 s, "why" for 3 alternative plants 2.3 s
   (timings vary by about ±0.2 s from run to run; plans and all other numbers are deterministic).
 - **"Plant B loses 30%" for all 4 weeks:** 9 → 22 late orders, 1 deferred, 32 plant changes, cost 285,583 →
@@ -199,3 +209,27 @@ order to each alternative and re-solve the whole plan (a counterfactual). The an
 would be 287 cheaper for O-001, but it can't deliver O-001 on time, and two other orders (O-110, O-112) would also
 become late". Every number comes
 from that re-solve.
+
+## 11. Known limitations (REVIEW-003, not fixed within the timebox)
+
+The objective is one weighted sum, not a strict priority order. Codex found three cases where that shows:
+
+1. **A one-day delay can beat a dearer on-time plant.** One order, qty 1, planning start 2026-10-05, due 10-13:
+   plant A costs 10 and arrives 10-14 (one day late); plant B costs 11 and arrives 10-13. Default weights pick A
+   (objective 0.71). A late day is 1% of the plan's normalised cost, and here 1 money is 10% of the plan.
+   On the 120-order pack a late day is worth about 3,800, so this needs an order whose late option is that much
+   cheaper. Fix: solve delivery first (late days), then cost and carbon (lexicographic), or a per-day coefficient
+   above the largest possible cost+carbon swing.
+2. **The defer penalty can leave a feasible order unplanned.** Two 100-unit orders, two 100-unit slots: plant A is
+   shared and makes P1 and P2 cheaply, plant B makes only P1 and expensively, P2 can only use A. The solver returns
+   OPTIMAL with P1 at A and P2 deferred (objective 0.82), although P1 at B and P2 at A is fully assigned and on
+   time. The penalty is per order (worst option + one week + 0.05), so it cannot price the knock-on move that frees
+   P2's only slot. Fix: first minimise the number of deferred orders and fix that, then optimise delivery, cost
+   and carbon. (The earlier flat big-M did that in one solve, but made dozens of orders late: a two-stage solve is
+   needed, not a bigger constant.)
+3. **Minimal change is not strictly below one late day.** 0.0001 per moved order: 101 moves cost 0.0101, more than
+   one late order-day (0.01), so on 120 orders stability can buy a day of lateness. Fix: a coefficient below
+   0.01 / (number of orders), or the same lexicographic order (delivery, then moves).
+
+The validator reports all three honestly (late and deferred orders are always flagged), so a plan affected by them
+is never shown as cleaner than it is.

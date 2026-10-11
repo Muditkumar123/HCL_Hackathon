@@ -177,3 +177,51 @@ def test_replan_report_before_after(trap_ds):
     assert any(c.from_plant == "A" for c in rep["changes"])
     md = to_markdown(rep, "drill")
     assert "| Before |" in md and "| After (re-plan) |" in md and "orders changed plant" in md
+
+
+# ---------------------------------------------------------------- REVIEW-003 #4: validator bypasses (Codex's inputs)
+def _valid_plan(ds):
+    plan = solve_allocation(ds, Weights()).assignments
+    assert validate_plan(ds, plan).eligibility_ok
+    return plan
+
+
+def _swap(plan, oid, **update):
+    return [a.model_copy(update=update) if a.order_id == oid else a for a in plan]
+
+
+def test_validator_rejects_non_finite_cost_and_carbon(trap_ds):
+    plan = _swap(_valid_plan(trap_ds), "O-3", cost=float("nan"), carbon_kg=float("nan"))
+    v = validate_plan(trap_ds, plan)
+    assert not v.eligibility_ok and any("non-finite" in x for x in v.violations)
+
+
+def test_validator_rejects_missing_arrival_and_forged_due(trap_ds):
+    plan = _swap(_valid_plan(trap_ds), "O-3", arrival=None, due=date(2099, 1, 1))
+    v = validate_plan(trap_ds, plan)
+    assert not v.eligibility_ok
+    assert any("no arrival date" in x for x in v.violations) and any("does not match orders.csv due" in x
+                                                                     for x in v.violations)
+
+
+def test_validator_counts_mid_week_dates_in_their_monday_week(trap_ds):
+    trap_ds.orders.loc[trap_ds.orders["order_id"].isin(["O-5", "O-6"]), "qty"] = 600  # A: 1,000 per week
+    opts = build_options(trap_ds).set_index(["order_id", "plant", "week_start"])
+    rows = {o: opts.loc[(o, "A", date(2026, 10, 5))] for o in ("O-5", "O-6")}
+    plan = _valid_plan(trap_ds)
+    for o, r in rows.items():
+        plan = _swap(plan, o, plant="A", production_week=date(2026, 10, 5), cost=round(r.landed_cost, 2),
+                     carbon_kg=round(r.carbon_kg, 2), arrival=r.arrival, days_late=int(r.days_late),
+                     on_time=bool(r.on_time))
+    both_monday = validate_plan(trap_ds, plan)
+    assert not both_monday.capacity_ok
+    split = validate_plan(trap_ds, _swap(plan, "O-6", production_week=date(2026, 10, 6)))  # Tuesday
+    assert not split.capacity_ok  # 600 + 600 (+ any other A order that week) > 1,000, counted in Monday's week
+    assert split.violations[0].startswith("plant A week 2026-10-05") and "exceeds capacity 1,000" in split.violations[0]
+    assert any("is not a Monday" in x for x in split.violations)
+
+
+def test_validator_checks_unassigned_rows_are_canonical(trap_ds):
+    plan = _swap(_valid_plan(trap_ds), "O-3", plant=None)  # keeps cost, week and on_time=True
+    v = validate_plan(trap_ds, plan)
+    assert not v.eligibility_ok and any("unassigned but carries" in x for x in v.violations)

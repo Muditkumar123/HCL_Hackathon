@@ -85,24 +85,27 @@ def solve_allocation(ds: Dataset, weights: Weights, changes: Sequence[CapacityCh
                      base_plan: list[OrderAssignment] | None = None,
                      forced: dict[str, str] | None = None, time_limit_s: float = 10.0,
                      horizon_weeks: int | None = None, hint: list[OrderAssignment] | None = None,
-                     portfolio: bool = True, move_penalty: float = MOVE_PENALTY) -> SolveResult:
+                     portfolio: bool = True, move_penalty: float = MOVE_PENALTY,
+                     max_unassigned: int | None = None) -> SolveResult:
     """Optimal allocation of every order to (plant, week). See the module docstring for the MIP.
 
     `hint` is a plan whose placements the warm start keeps where they fit (speed only; not memoised).
     `portfolio=False` runs only the first warm start (callers that already solve many models in parallel).
     `move_penalty` is the objective charge per order moved off its base_plan plant (counterfactuals use more).
+    `max_unassigned` caps the number of deferred orders (the trade-off uses it, so INFEASIBLE is a real certificate).
     """
     t0 = time.perf_counter()
     try:
         key = None if hint else _cache_key(ds, weights, changes, carbon_cap_kg, require_all_on_time, base_plan,
-                                           forced, time_limit_s, horizon_weeks, (portfolio, move_penalty))
+                                           forced, time_limit_s, horizon_weeks,
+                                           (portfolio, move_penalty, max_unassigned))
         with _cache_lock:
             if key in _cache:
                 _cache.move_to_end(key)
                 log.debug("solve_allocation cache hit")
                 return _cache[key].model_copy(deep=True)
         args = (ds, weights, list(changes), carbon_cap_kg, require_all_on_time, base_plan, forced or {},
-                time_limit_s, horizon_weeks, hint, t0, move_penalty)
+                time_limit_s, horizon_weeks, hint, t0, move_penalty, max_unassigned)
         if not portfolio or len(build_options(ds, horizon_weeks)) <= FULL_SEARCH_MAX_OPTIONS:
             res = _solve(*args, warm="prefer" if hint or base_plan else "due")
         else:
@@ -371,7 +374,8 @@ def _infeasible(weights: Weights, t0: float, notes: list[str]) -> SolveResult:
 def _solve(ds: Dataset, weights: Weights, changes: list[CapacityChange], carbon_cap_kg: float | None,
            require_all_on_time: bool, base_plan: list[OrderAssignment] | None, forced: dict[str, str],
            time_limit_s: float, horizon_weeks: int | None, hint: list[OrderAssignment] | None,
-           t0: float, move_penalty: float = MOVE_PENALTY, warm: str = "prefer") -> SolveResult:
+           t0: float, move_penalty: float = MOVE_PENALTY, max_unassigned: int | None = None,
+           warm: str = "prefer") -> SolveResult:
     orders = ds.orders.assign(order_id=ds.orders["order_id"].astype(str))
     order_ids = list(orders["order_id"])
     due = dict(zip(order_ids, orders["due"]))
@@ -435,6 +439,8 @@ def _solve(ds: Dataset, weights: Weights, changes: list[CapacityChange], carbon_
                    + sum(min_carbon.get(o, 0.0) * u[o] for o in order_ids) <= carbon_cap_kg)
     for oid, plant in forced.items():
         solver.Add(sum(x[i] for i in by_order[oid] if opts.at[i, "plant"] == plant) == 1)
+    if max_unassigned is not None:
+        solver.Add(sum(u.values()) <= max_unassigned)
 
     # ---- objective
     coef = _coefficients(opts, weights, base_plan, move_penalty)

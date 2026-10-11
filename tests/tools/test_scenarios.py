@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import time
+from datetime import date
 
 from ai.tools.baseline import cheapest_plant_plan
 from ai.tools.scenarios import compare_plans, counterfactual, share_not_at_cheapest_plant, tradeoff_frontier
@@ -81,8 +82,10 @@ def test_counterfactual_displaces_other_orders(trap_ds):
     assert cf.feasible
     # cheapest knock-on under default weights: push O-6 to week 2 (1 day late) rather than move an order to B
     assert cf.new_late_orders == ["O-6"]
-    assert [(d.order_id, d.from_plant, d.to_plant) for d in cf.displaced_orders] == [("O-6", "A", "A")]
-    assert "Now 1 day late" in cf.displaced_orders[0].reason
+    # O-5 swaps weeks inside plant A to make room (a same-plant week move is a change too, REVIEW-003 #6)
+    moved = {d.order_id: (d.from_plant, d.to_plant, d.reason) for d in cf.displaced_orders}
+    assert set(moved) == {"O-5", "O-6"} and moved["O-5"][:2] == ("A", "A") and moved["O-6"][:2] == ("A", "A")
+    assert "Now 1 day late" in moved["O-6"][2] and "production week" in moved["O-5"][2]
     lateness_first = counterfactual(trap_ds, solve_allocation(trap_ds, Weights(lateness=100)), "O-4", "A")
     # with lateness expensive, the cheapest way to make room is O-3 (200 units, FR) A -> B: +300
     assert {d.order_id: (d.from_plant, d.to_plant) for d in lateness_first.displaced_orders} == {"O-3": ("A", "B")}
@@ -136,3 +139,22 @@ def test_graph_end_to_end(trap_ds, monkeypatch):
         assert resp.answer_type in expected, (text, resp.summary, resp.limitations)
         assert resp.validator is not None and resp.validator.capacity_ok, (text, resp.validator)
         assert os.environ["MOCK_LLM"] == "true" and trace.steps
+
+
+def test_compare_plans_keeps_same_plant_week_moves(trap_ds):
+    base = solve_allocation(trap_ds, Weights())
+    o1 = next(a for a in base.assignments if a.order_id == "O-2")       # C, week 2026-10-12, on time
+    moved = o1.model_copy(update={"production_week": date(2026, 10, 5), "arrival": date(2026, 10, 13)})
+    new = base.model_copy(update={"assignments": [moved if a.order_id == "O-2" else a for a in base.assignments]})
+    diff = compare_plans(trap_ds, base, new)
+    assert [c.order_id for c in diff] == ["O-2"] and "production week 2026-10-12 -> 2026-10-05" in diff[0].reason
+
+
+def test_frontier_certifies_impossible_cuts_and_attaches_plans(trap_ds):
+    base = solve_allocation(trap_ds, Weights())
+    k0 = sum(a.carbon_kg for a in base.assignments)
+    # REVIEW-003 #3: with deferrals capped, SCIP's INFEASIBLE is a certificate, not a failed search
+    assert solve_allocation(trap_ds, Weights(), carbon_cap_kg=k0 * 0.5, max_unassigned=0).status == "INFEASIBLE"
+    pts = tradeoff_frontier(trap_ds, Weights(), cuts=(0, 50))
+    assert all(p.plan is not None and p.plan.kpis.total_cost == p.cost for p in pts if p.feasible)
+    assert all(p.plan is None for p in pts if not p.feasible)

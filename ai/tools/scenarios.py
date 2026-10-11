@@ -15,7 +15,7 @@ from concurrent.futures import ThreadPoolExecutor
 from ai.tools.cost_model import build_options
 from ai.tools.solver import plan_objective, solve_allocation
 from shared.models import (
-    KPIs, CapacityChange, CounterfactualResult, Dataset, OrderAssignment, PlanChange, SolveResult, TradeoffPoint, Weights,
+    CapacityChange, CounterfactualResult, Dataset, OrderAssignment, PlanChange, SolveResult, TradeoffPoint, Weights,
 )
 
 log = logging.getLogger(__name__)
@@ -45,6 +45,11 @@ def tradeoff_frontier(ds: Dataset, weights: Weights, cuts: Sequence[float] = (0,
       reaches, rounded down to 0.1%. Read it as the feasible point with the largest carbon_cut_pct (a requested
       cut between the rounded and the exact value is feasible too). Every point beyond it has feasible=False, so
       the answer can say "a 10% cut is not achievable; the best is X% at +Y cost and Z late orders".
+    * feasible=False is NOT a proof by itself (REVIEW-003 #3): the searches are time-limited heuristics. A cut is
+      proven impossible only when SCIP returns INFEASIBLE for its cap (a certificate, e.g. the LP relaxation cannot
+      reach it). If the contract gains a `proven` field, it is True for found plans and certified cuts, else False.
+    * Each feasible point carries its own plan in `plan` (internal, not serialised; DECISIONS.md D-007), so a
+      requested cut is answered with exactly the plan behind its row.
     * A cut is also infeasible if it would leave more orders unassigned than the 0% plan.
     * Monotone by construction: a plan that meets a deeper cut also meets every shallower one, so each point keeps
       the best plan (solver objective) among its own solve and every deeper feasible solve.
@@ -67,7 +72,8 @@ def tradeoff_frontier(ds: Dataset, weights: Weights, cuts: Sequence[float] = (0,
 
     def capped(cut: float, hint: list[OrderAssignment] | None = None) -> SolveResult:
         return solve_allocation(ds, weights, changes, carbon_cap_kg=k0_kg * (1 - cut / 100),
-                                time_limit_s=time_limit_s, hint=hint, portfolio=hint is None)
+                                time_limit_s=time_limit_s, hint=hint, portfolio=hint is None,
+                                max_unassigned=max_unassigned)
 
     min_carbon = solve_allocation(ds, green, changes, time_limit_s=time_limit_s)
     k_min_kg = _carbon_kg(min_carbon) if ok(min_carbon, float("inf")) else None
@@ -88,26 +94,37 @@ def tradeoff_frontier(ds: Dataset, weights: Weights, cuts: Sequence[float] = (0,
         results.setdefault(deepest, None)
 
     objective = {id(r): plan_objective(ds, r.assignments, weights) for r in candidates if r.kpis is not None}
-    best: dict[float, KPIs | None] = {}
+    best: dict[float, SolveResult | None] = {}
     for cut in sorted(results):
         feasible = [r for r in candidates if ok(r, k0_kg * (1 - cut / 100))]
-        best[cut] = min(feasible, key=lambda r: objective[id(r)]).kpis if feasible else None
-    ref = best[0.0] or base.kpis
+        best[cut] = min(feasible, key=lambda r: objective[id(r)]) if feasible else None
+    ref = best[0.0].kpis if best[0.0] is not None else base.kpis
     points: list[TradeoffPoint] = []
-    for cut, k in best.items():
-        if k is None:
-            points.append(TradeoffPoint(carbon_cut_pct=cut, cost=0.0, carbon_t=round(k0_kg * (1 - cut / 100) / 1000, 3),
-                                        late_orders=0, feasible=False))
+    for cut, r in best.items():
+        if r is None:
+            solved = results.get(cut)
+            points.append(_point(carbon_cut_pct=cut, cost=0.0, carbon_t=round(k0_kg * (1 - cut / 100) / 1000, 3),
+                                 late_orders=0, feasible=False,
+                                 proven=solved is not None and solved.status == "INFEASIBLE"))
             continue
+        k = r.kpis
         d_carbon = ref.total_carbon_t - k.total_carbon_t
         price = round((k.total_cost - ref.total_cost) / d_carbon, 2) if cut > 0 and d_carbon > 1e-9 else None
-        points.append(TradeoffPoint(carbon_cut_pct=cut, cost=k.total_cost, carbon_t=k.total_carbon_t,
-                                    late_orders=k.late_orders, implied_carbon_price_per_t=price))
+        points.append(_point(carbon_cut_pct=cut, cost=k.total_cost, carbon_t=k.total_carbon_t,
+                             late_orders=k.late_orders, implied_carbon_price_per_t=price, proven=True,
+                             plan=r.model_copy(deep=True)))
     if 0.0 not in wanted:
         points = [p for p in points if p.carbon_cut_pct != 0]
     log.info("tradeoff_frontier points=%d feasible=%d deepest_cut=%.1f%%", len(points),
              sum(p.feasible for p in points), deepest)
     return points
+
+
+def _point(proven: bool, plan: SolveResult | None = None, **kw) -> TradeoffPoint:
+    """TradeoffPoint; `proven` (feasibility is certain: plan found, or SCIP proved the cap infeasible) and `plan` are
+    set only if the contract has those fields (proven requested from Mudit in worker1.md)."""
+    fields = TradeoffPoint.model_fields
+    return TradeoffPoint(**kw, **{k: v for k, v in (("proven", proven), ("plan", plan)) if k in fields})
 
 
 # ============================================================ plan diff
@@ -121,7 +138,7 @@ def _week_loads(plan: Sequence[OrderAssignment], qty: dict[str, float]) -> dict[
 
 def compare_plans(ds: Dataset, base: SolveResult, new: SolveResult, changes: Sequence[CapacityChange] = (),
                   forced: dict[str, str] | None = None) -> list[PlanChange]:
-    """Orders whose plant changed (or whose on-time status changed) between two plans, with a code-built reason."""
+    """Orders whose plant, production week or on-time status changed between two plans, with a code-built reason."""
     qty = dict(zip(ds.orders["order_id"].astype(str), ds.orders["qty"].astype(float)))
     base_by = {a.order_id: a for a in base.assignments}
     base_load, new_load = _week_loads(base.assignments, qty), _week_loads(new.assignments, qty)
@@ -134,8 +151,8 @@ def compare_plans(ds: Dataset, base: SolveResult, new: SolveResult, changes: Seq
     out: list[PlanChange] = []
     for n in new.assignments:
         b = base_by.get(n.order_id)
-        if b is None or (b.plant == n.plant and b.on_time == n.on_time):
-            continue
+        if b is None or (b.plant, b.production_week, b.on_time) == (n.plant, n.production_week, n.on_time):
+            continue  # REVIEW-003 #6: a same-plant week move is a change too
         parts: list[str] = []
         if n.order_id in forced:
             parts.append(f"{n.order_id} is forced to plant {forced[n.order_id]}.")
