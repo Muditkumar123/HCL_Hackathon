@@ -323,8 +323,9 @@ def _suite_md(suite: str, runs: dict[str, dict]) -> list[str]:
     lines = [f"## {title}", "", f"`eval/{path.name}`, {sums[labels[0]]['cases']} cases.", "",
              f"| metric | {head} |", "|---|" + "---|" * len(labels)]
     for name, key, kind in ROWS:
-        cells = [f"{sums[lab][key]}/{sums[lab]['cases']}" if key == "passed" else _fmt(sums[lab][key], kind)
-                 for lab in labels]
+        cells = [f"{sums[lab][key]}/{sums[lab]['cases']}" if key == "passed"
+                 else "n/a (answer type only)" if key == "conditions_pass_rate" and sums[lab][key] is None
+                 else _fmt(sums[lab][key], kind) for lab in labels]
         lines.append(f"| {name} | " + " | ".join(cells) + " |")
     lines += ["", f"### {title}: per case", "", "| case | category | expected | " + " | ".join(labels) + " |",
               "|---|---|---|" + "---|" * len(labels)]
@@ -364,7 +365,11 @@ def report_md(runs: dict[str, dict]) -> str:
              + ", ".join(f"**{lab}** = {CONFIG_NAMES[runs[lab]['llm_on']]}" for lab in labels) + ".", "",
              "Overall: " + "; ".join(f"{lab} {p}/{n}" for lab, (p, n) in total.items()) + " cases passed.", "",
              "Router fallback is n/a for MOCK_LLM (the rules router is the configuration, not a fallback). "
-             "Plan validity counts only answers that present a plan (allocation, scenario, brief).", ""]
+             "Plan validity counts only answers that present a plan (allocation, scenario, brief).",
+             "Faithfulness is measured on the text that is shown: LLM text that fails the number guard twice is "
+             "replaced by the code-written template (counted in 'Template after 2 failed writes').",
+             "Suites run in one process, team first. The solver memoises results on the table contents, so solves "
+             "repeated in the auditor suite return faster; compare latency within a suite, not across suites.", ""]
     for s in suites:
         lines += _suite_md(s, runs)
     return "\n".join(lines)

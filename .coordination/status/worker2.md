@@ -106,3 +106,29 @@ cost 285,685 -> 284,409.
   (expected while the fixes are in progress).
 - Open question for the team: tradeoff-001 expects a feasible 10% cut. Either change the case to the deepest
   achievable cut, or I give the generated pack more capacity headroom (it changes every number in the README and traces).
+
+## Round 3 (requested by Shivang)
+| Item | State |
+|---|---|
+| 1. /health passes `validation_passed=` into HealthResponse (no hand-added key) | DONE (6862736) |
+| 2. run_eval.py runs both suites: team (eval/cases_team.yaml, 24) + independent auditor (eval/cases.yaml, 26, Codex format, fail-closed) | DONE (cff26e6) |
+| 3. ruff: unused `statistics` import | DONE (7cfa662); ruff clean |
+| 4. Re-run both configs, eval/report.md in two sections | DONE at cff26e6 (clean worktree, includes Mudit's 02074ee) |
+| 5. Saved plans carry data_version; latest_plan() only returns a plan for the current data | DONE (9aede84) + tests |
+
+### Eval at cff26e6 (eval/report.md)
+| | Team mock | Team llm | Auditor mock | Auditor llm |
+|---|---|---|---|---|
+| Passed | 21/24 | 21/24 | 21/26 | 20/26 |
+| Plan validity / faithfulness | 100% / 100% | 100% / 100% | 100% / 100% | 100% / 100% |
+| p50 | 1.7 s | 3.8 s | 0.1 s (solver cache) | 2.5 s |
+
+- Team trade-01/03/04 now return `infeasible` (after 02074ee): 5%, 10% and 20% cuts are infeasible on this pack
+  (deepest cut 3.8%). The cases still expect `scenario`. I left them unchanged; the team needs to decide (same
+  question as auditor tradeoff-001).
+- qwen2.5:7b: faithfulness retries 8 (team) + 3 (auditor); 2 answers fell back to the template after two failed
+  writes (alloc-02, explain-03). The shown text is still 100% faithful.
+- Still open for Mudit: API weights overridden by LLM-parsed weights (weights-002/003), invent-001/002 not refused,
+  guard-002/003 in MOCK_LLM.
+- Ayush had uncommitted edits in ai/tools/solver.py during this run, so I ran the eval from a clean worktree at
+  HEAD. I'll re-run when he commits.

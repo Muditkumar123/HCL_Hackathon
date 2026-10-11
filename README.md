@@ -130,30 +130,36 @@ capacity, weekly carbon intensity, and capacity events. See [data/DATA_CARD.md](
 
 ## Eval results
 
-Same 26 cases ([eval/cases.yaml](eval/cases.yaml)), same data, same solver (after Ayush's solver fix, 60f8679);
-only the language layer changes.
-Full per-case results and the failing conditions are in [eval/report.md](eval/report.md).
+Two suites, two configurations, same data and solver; only the language layer changes. Full per-case results and
+every failing condition are in [eval/report.md](eval/report.md).
+- **Team cases** ([eval/cases_team.yaml](eval/cases_team.yaml), 24): written by us; checks the answer type.
+- **Independent auditor cases** ([eval/cases.yaml](eval/cases.yaml), 26): written by Codex as an independent
+  auditor, with machine-checked conditions (format: `.coordination/reviews/EVAL-FORMAT.md`). Conditions fail closed.
 
-| metric | MOCK_LLM (rules + template) | qwen2.5:7b on GPU |
-|---|---|---|
-| Cases passed | 21/26 | 20/26 |
-| Answer-type (intent) accuracy | 85% | 92% |
-| Condition checks passed | 92% | 88% |
-| Plan validity | 100% | 100% |
-| Faithfulness (number guard) | 100% | 100% |
-| Router fallback to rules | n/a | 0% |
-| Text from template | 100% | 0% |
-| Faithfulness retries | 0 | 0 |
-| Latency p50 / p95 | 1.1 s / 4.8 s | 2.7 s / 8.3 s |
-| LLM calls per request | 0 | 1.58 |
-| Tokens per request | 0 | 1,058 |
+| metric | Team: MOCK_LLM | Team: qwen2.5:7b | Auditor: MOCK_LLM | Auditor: qwen2.5:7b |
+|---|---|---|---|---|
+| Cases passed | 21/24 | 21/24 | 21/26 | 20/26 |
+| Answer-type (intent) accuracy | 88% | 88% | 81% | 88% |
+| Condition checks passed | n/a | n/a | 92% | 88% |
+| Plan validity | 100% | 100% | 100% | 100% |
+| Faithfulness of the shown text | 100% | 100% | 100% | 100% |
+| Router fallback to rules | n/a | 0% | n/a | 0% |
+| Text from template | 100% | 11% | 100% | 0% |
+| Faithfulness retries / template after 2 fails | 0 / 0 | 8 / 2 | 0 / 0 | 3 / 0 |
+| Latency p50 / p95 | 1.7 s / 4.9 s | 3.8 s / 8.3 s | 0.1 s / 4.9 s | 2.5 s / 8.4 s |
+| LLM calls / tokens per request | 0 / 0 | 1.92 / 1,338 | 0 / 0 | 1.69 / 1,237 |
 
-What it shows: both configurations produce only valid plans, and every number in the text matched the solver.
-The LLM classifies requests better (it refuses the two "write the allocation by hand / ignore eligibility" cases the
-rules router misses) for about 1.6 s more at p50. It fails two weight cases the rules router passes, because
-weights read from the text override the weights sent in the request (see Limitations). Against the naive
-cheapest-plant baseline (which ignores capacity and due dates), the allocation costs 7.3% more, emits 19.4% less
-carbon and has 11 late orders instead of 88.
+What it shows:
+- Both configurations show only valid plans, and every number in the shown text matched the solver.
+- qwen2.5:7b's first draft failed the number guard in 9 of 50 answers. In 2 of them the retry also failed, so the
+  code-written template was shown instead.
+- The LLM refuses two rule-breaking requests that the rules router lets through. It costs about 2 s more at p50.
+- With the LLM on, two weight cases fail: weights read from the request text override the weights sent in the
+  request body (see Limitations).
+- The auditor suite runs second, and the solver caches results, so its latency is not comparable with the team suite's.
+
+Against the naive cheapest-plant baseline (which ignores capacity and due dates), the allocation costs 7.3% more,
+emits 19.4% less carbon and has 11 late orders instead of 88.
 
 ## Assumptions
 
@@ -179,8 +185,9 @@ carbon and has 11 late orders instead of 88.
   - The input guard misses requests to put invented savings into a brief, and in MOCK_LLM mode it also misses
     "hand-written allocation" requests.
   - With the LLM on, weights parsed from the text override the `weights` sent in the request body.
-  - A 10% carbon cut is infeasible on the generated pack: plants run at 86–96% utilisation, and the deepest
-    achievable cut is 3.8% (+6,414 cost, 61 late orders). The eval case expects 10% to be feasible.
+  - Carbon cuts of 5% or more are infeasible on the generated pack: plants run at 86–96% utilisation, and the
+    deepest achievable cut is 3.8% (+6,414 cost, 61 late orders). The API now answers `infeasible` for them, but
+    four eval cases (three team, one auditor) still expect a feasible trade-off.
 - Single transport mode per route; no batch sizes, changeovers or inventory.
 - SQLite on one node; no authentication. Data is synthetic and not calibrated to real grids or tariffs.
 
