@@ -122,9 +122,8 @@ def ingest(file: UploadFile = File(...), meta: str = Form(...)) -> JSONResponse 
     return res
 
 
-@app.get("/health", response_model=None)
-def health() -> JSONResponse:
-    """HealthResponse plus `validation_passed` (extra key: the contract model has no field for it yet)."""
+@app.get("/health", response_model=HealthResponse)
+def health() -> HealthResponse:
     from ai.llm import health as llm_health
 
     try:
@@ -143,8 +142,8 @@ def health() -> JSONResponse:
         log.warning("health: validation failed to run: %s", exc)
         validation_passed = False
     ok = data_store == "ok" and not llm.startswith("error") and validation_passed
-    body = HealthResponse(status="ok" if ok else "degraded", data_store=data_store, llm=llm, tables=tables)
-    return JSONResponse({**body.model_dump(mode="json"), "validation_passed": validation_passed})
+    return HealthResponse(status="ok" if ok else "degraded", data_store=data_store, llm=llm, tables=tables,
+                          validation_passed=validation_passed)
 
 
 @app.get("/validation")
