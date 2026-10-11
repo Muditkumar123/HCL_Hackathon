@@ -79,6 +79,13 @@ problem (answer to Shivang's "lateness may be under-weighted" note).
 | 6 | Same-plant week moves dropped from the diff | **Fixed** + test |
 | 1, 2, 5 | Avoidable lateness (1-day probe), defer penalty leaves a feasible order unplanned, move penalty > 1 late day at 101 moves | **Documented** in `docs/solver.md` §11 with Codex's numbers and the fix (lexicographic: deferrals, then delivery, then cost/carbon/moves). Not done: needs a two-stage solve and re-measuring every number, > 15 min |
 
+### REVIEW-004 (15:23–15:31): the two solver-correctness scenarios
+Both of Codex's cases are OPTIMAL under the current objective, so (a) a repair pass that only accepts objective
+improvements and (b) a longer time limit cannot fix them. Tried two objective changes; each fixed its case and made
+the real plan worse (lateness floor: 9 → 10 late, 13 → 14 days; defer + total spread: 9 → 12 late, gap 3.1% → 11.5%,
+B −30% 2 deferred). **Reverted; current solver kept.** Both cases are strict xfail tests with Codex's exact inputs
+(`tests/tools/test_review004.py`); `docs/solver.md` §11 has the table and the real fix (two-stage lexicographic solve).
+
 ### Needs action from others
 - **Mudit (`shared/models.py`, REVIEW-003 #3):** please add `proven: bool = True` to `TradeoffPoint`. The frontier
   already fills it when the field exists (True: plan found, or SCIP proved the cap impossible; False: not found in

@@ -231,5 +231,20 @@ The objective is one weighted sum, not a strict priority order. Codex found thre
    one late order-day (0.01), so on 120 orders stability can buy a day of lateness. Fix: a coefficient below
    0.01 / (number of orders), or the same lexicographic order (delivery, then moves).
 
+**Tried in REVIEW-004 and reverted.** Cases 1 and 2 are OPTIMAL under the current objective, so a repair pass or a
+longer time limit cannot change them; only the objective can. Two narrow changes each fixed its own case (Codex's
+exact inputs are in `tests/tools/test_review004.py`) but made the real plan worse **[pack]**:
+
+| Change | Codex case | 120-order main plan | B −30% re-plan |
+|---|---|---|---|
+| none (current) | fails | 9 late, 13 late days, 3.1% from bound | 22 late, 1 deferred |
+| late day ≥ the order's own cost/carbon spread | case 1 fixed | 10 late, 14 days, 3.5% | 24 late, 50 days |
+| defer penalty + the plan's total cost/carbon spread | case 2 fixed | 12 late, 27 days, 11.5% | 25 late, 2 deferred |
+
+Both kept the weighted objective and only made some coefficients much larger, and SCIP's root-node search does
+worse with them. The real fix is a two-stage (lexicographic) solve: minimise deferred orders, fix that count,
+minimise late days, fix that, then optimise cost and carbon. It needs a time budget per stage and re-measuring every
+number here. The two cases are strict expected failures in the test suite, so they flip loudly once fixed.
+
 The validator reports all three honestly (late and deferred orders are always flagged), so a plan affected by them
 is never shown as cleaner than it is.
