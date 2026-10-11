@@ -24,35 +24,37 @@ Signatures match `ai/graph.py default_deps()` exactly. Extra keyword arguments a
 
 **Run:** `MOCK_LLM=true pytest tests/tools -q` (36 passed, ~25 s) · `ruff check ai/tools tests/tools` clean.
 
-### Frozen pack v2 (`data/raw`, data_version 006f981d: 120 orders, 5 plants, 4 weeks, 1,592 options), weights 0.7/0.3
+**Data pack: v1 is frozen** (Shivang's revert 8e785f2). All numbers here and in `docs/solver.md` are from v1,
+data_version e543801d. (I briefly moved them to v2 in eba2dd4 before seeing the revert; reverted.)
+
+### Real pack (`data/raw`, data_version e543801d: 120 orders, 5 plants, 4 weeks, 1,592 options), weights 0.7/0.3
 | | Result |
 |---|---|
-| Main plan | **1.3 s**, within 0.4% of SCIP's proven lower bound; validator: capacity, eligibility and delivery ok |
-| KPIs | cost 311,029 · carbon 12.9 t · **0 late** · 0 deferred · utilisation A 27%, B 66%, C 95%, D 85%, E 87% |
-| Baseline (cheapest plant) | cost 269,200 · carbon 24.3 t · **85 late** · **3 overloaded slots** (A wk 2 Nov: 13,579 units vs 1,275) |
-| Orders NOT at their cheapest eligible plant | **75%** (90 of 120) |
-| Trade-off frontier | **5.7 s**. 5%: +3,894, 6 late, 5,610/t · 10%: +6,800, 13 late, 5,143/t · deepest **14.5%**: +6,955, 49 late, 3,708/t. 15%+ not achievable (60 s min-carbon search within 1.0% of its bound: limit ≤ ~15.3%) |
-| Re-plan "B loses 30%" (all weeks) | 1.9 s, OPTIMAL · 0 → **0 late** · 24 plant changes · cost 311,029 → 309,930 · validator ok |
-| "Why" counterfactual | 1.2 s for 3 alternative plants (O-001: A is 409 cheaper but late) |
+| Main plan | **1.4 s**, FEASIBLE (deterministic), within 3.1% of SCIP's proven lower bound; validator: capacity ok, eligibility ok |
+| KPIs | cost 285,583 · carbon 19.8 t · **9 late** (13 late order-days) · 0 deferred · utilisation 86–96% |
+| Baseline (cheapest plant) | cost 266,355 · carbon 24.4 t · **88 late** · **3 overloaded slots** (A wk 2 Nov: 13,469 units vs 1,275) |
+| Orders NOT at their cheapest eligible plant | **58%** (70 of 120) |
+| Trade-off frontier | **6.2 s**. Deepest achievable cut **5.4%**: +4,003 cost, 49 late, implied **3,727 per t** (money only). 10%+ not achievable |
+| Re-plan "B loses 30%" (all weeks) | 3.9 s · 9 → **22 late** (was 67 before the fix) · 1 deferred · 32 plant changes · validator ok |
+| "Why" counterfactual | 2.3 s for 3 alternative plants; 3–5 orders displaced each |
 
-`docs/solver.md` is updated to these v2 numbers (v1 numbers kept only where they explain a design decision, marked
-[v1]). Note for Mudit: QUEUE item said "numbers stand", but the doc was written on v1 (e543801d), before the v2
-regeneration; they did not stand, now they do.
+Numbers changed since round 1 (3.8% at 8,496/t, 59%, 11 late) because the search improved; see `docs/solver.md` §9.
 
 ### Late data drop
-**Real drop: not received yet** (`data/raw/capacity_events.csv` and the DB hold only E-1, E-2). When it lands:
+**Real drop: not received yet** (`data/raw/capacity_events.csv` and the DB still hold only E-1, E-2). When it lands:
 `python -m ai.tools.replan_report <new capacity_events.csv> --mode replace` (or `--mode append` if the file holds only
 the new events), then paste the table here. The live path stays Shivang's `scripts/late_drop.py`.
 
-#### Dry run on v2 (not the real drop): Shivang's drill event E-3 appended (Plant E −50%, 12–25 Oct)
+#### Dry run (not the real drop): Shivang's drill event E-3 appended (Plant E −50%, 12–25 Oct)
 | Plan | Cost | Carbon (t) | Late orders | Deferred | Solve | Validator |
 |---|---|---|---|---|---|---|
-| Before | 311,029 | 12.9 | 0 (0 days) | 0 | 1.2 s | capacity_ok=True, eligibility_ok=True |
-| After (re-plan) | 306,608 | 14.4 | 0 (0 days) | 0 | 1.3 s | capacity_ok=True, eligibility_ok=True |
+| Before | 285,583 | 19.8 | 9 (13 days) | 0 | 1.5 s | capacity_ok=True, eligibility_ok=True |
+| After (re-plan) | 283,901 | 20.2 | 19 (35 days) | 0 | 2.4 s | capacity_ok=True, eligibility_ok=True |
 
-Change: cost −4,421, carbon +1.5 t, late 0 → 0, 23 orders changed plant. E is a green-tariff plant: losing half of it
-moves orders to cheaper, dirtier plants, so the plan gets cheaper and less green. (On v1 the same drill gave
-9 → 19 late.)
+Change: cost −1,682, carbon +0.4 t, late 9 → 19, 36 orders changed plant or on-time status. E-3 takes 800 units out of
+the two earliest weeks, the bottleneck for orders due first. Cost falls because some orders that are now late anyway
+stop paying for an expensive on-time route. A 30 s full search does no better (22 late), so this is not a weighting
+problem (answer to Shivang's "lateness may be under-weighted" note).
 
 ### Round 2 changes
 1. **Frontier always includes the deepest feasible cut** as its own point: the feasible point with the largest
