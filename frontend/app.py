@@ -28,6 +28,8 @@ API_URL = os.getenv("API_URL", "http://localhost:8000").rstrip("/")
 TIMEOUT = httpx.Timeout(120.0, connect=5.0)   # the real LLM can take a while; the solver is capped at 10 s
 TABLES = ["orders", "plants", "transport_duties", "capacity_events"]
 MAX_HISTORY = 20
+DEFAULT_COST_PCT = 70       # shared.models.Weights defaults (0.7 / 0.3, lateness 1.0)
+DEFAULT_LATENESS = 1.0
 
 # One example per capability. These are requests only; the answers always come from the API.
 EXAMPLES = [
@@ -77,9 +79,11 @@ def get_validation() -> tuple[list | None, str | None]:
 
 
 def build_payload(request: str, cost_pct: int, lateness: float, capacity_change: dict | None = None) -> dict:
-    """AnalyzeRequest body. The API re-normalises cost + carbon weights."""
-    payload: dict[str, Any] = {"request": request,
-                               "weights": {"cost": cost_pct / 100, "carbon": 1 - cost_pct / 100, "lateness": lateness}}
+    """AnalyzeRequest body. Weights are sent only when they differ from the defaults: explicit API weights beat the
+    request text (D-005), so untouched sliders must not override "cheapest" or "greenest" in the request."""
+    payload: dict[str, Any] = {"request": request}
+    if cost_pct != DEFAULT_COST_PCT or lateness != DEFAULT_LATENESS:
+        payload["weights"] = {"cost": cost_pct / 100, "carbon": 1 - cost_pct / 100, "lateness": lateness}
     if capacity_change:
         payload["scenario"] = {"capacity_changes": [capacity_change]}
     return payload
@@ -174,11 +178,15 @@ def sidebar() -> dict[str, Any]:
             st.rerun()
 
         st.header("Objective weights")
-        cost_pct = st.slider("Cost weight (%)", 0, 100, 70, step=5,
+        cost_pct = st.slider("Cost weight (%)", 0, 100, DEFAULT_COST_PCT, step=5,
                              help="Carbon weight is the rest. Default 70/30: cost first, carbon second.")
         st.caption(f"Carbon weight: {100 - cost_pct}%")
-        lateness = st.number_input("Lateness weight", 0.0, 10.0, 1.0, step=0.5,
+        lateness = st.number_input("Lateness weight", 0.0, 10.0, DEFAULT_LATENESS, step=0.5,
                                    help="Penalty per late order-day. 1.0 makes on-time delivery dominate.")
+        if cost_pct == DEFAULT_COST_PCT and lateness == DEFAULT_LATENESS:
+            st.caption("Defaults are not sent, so words like \"cheapest\" or \"greenest\" in your request apply.")
+        else:
+            st.caption("These weights are sent and take priority over wording in your request.")
 
         st.header("Capacity loss")
         with st.form("capacity_form"):

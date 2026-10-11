@@ -189,9 +189,9 @@ def build_graph(deps: Deps):
     def intent_guard(s: State) -> dict:
         t0 = time.perf_counter()
         v, intent = guards.intent_guard(s["intent"], s["cleaned"], s["ds"], s["req"].scenario)
-        # a weights_override survives G2 only if the request text asks for it ("cheapest", "weights"), so it is
-        # the user's more specific instruction; see .coordination/debates/DEBATE-001.md (#2)
-        weights = intent.weights_override or s["req"].weights or Weights()
+        # explicit API weights beat parsed text, like the API scenario (D-005). The UI omits weights at the
+        # 70/30 default, so a grounded "cheapest"/"greenest" in the request still applies there.
+        weights = s["req"].weights or intent.weights_override or Weights()
         out: dict = {"intent": intent, "weights": weights, "assumptions": v.notes,
                      "steps": _step("guard", "intent_guard", t0, check=v.check)}
         if not v.ok:

@@ -22,3 +22,17 @@
   "share of capacity lost" applies. Router, LLM output and CSV rows are taken as percentages.
 - Impact: Ayush's `test_effective_capacity_applies_events_and_changes` relied on the old conversion and needs
   `capacity_loss_pct=20`.
+
+## D-005 Weights precedence: explicit API weights beat parsed text (REVIEW-001 #2)
+- Rule: `AnalyzeRequest.weights` > grounded `weights_override` from the request text ("cheapest", "greenest",
+  "cost only", "weights") > default 70/30. Consistent with "the API scenario wins over parsed text".
+- UI: `frontend/app.py` sends `weights` only when the cost slider differs from 70% or the lateness weight from 1.0,
+  so with untouched sliders "Give me the cheapest plan that is on time" still runs cost-only.
+- Tests: `test_api_weights_beat_grounded_override`, `test_frontend_sends_weights_only_when_changed`.
+
+## D-006 Late orders do not make a valid plan `infeasible` (REVIEW-001 #6)
+- Rule: `answer_type = infeasible` only for unassigned orders, an all-on-time request that cannot be met, or a plan
+  that fails validation (a failed plan is not shown). Late orders in a valid plan keep `allocation`/`scenario`; they
+  are listed in `limitations`, flagged by `validator.delivery_ok=false`, and the writer must mention them.
+- Why: the guide's own example returns `answer_type: "allocation"` with 2 late orders.
+- TASK-003 line 105 updated to match.

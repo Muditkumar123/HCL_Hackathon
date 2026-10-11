@@ -102,7 +102,10 @@ def run(req: AnalyzeRequest, ds: Dataset) -> tuple[AnalyzeResponse, TraceRecord]
 ```
 Every node appends a `TraceStep` (agent, tool, input summary, output summary, duration_ms). **Gate:** if
 `validate_plan` returns violations, the plan is not shown as valid. The answer becomes `infeasible`, and the violations are listed.
-Any order late or unassigned → `answer_type = infeasible` with the closest plan (the soft solve). Recommendations
+`answer_type = infeasible` when orders are unassigned, when the user asked for an all-on-time plan that cannot be met,
+or when validation fails (a failed plan is not shown; otherwise the closest valid plan is). Late orders in an otherwise
+valid plan keep `allocation`/`scenario`: they are listed in `limitations`, flagged by `validator.delivery_ok=false`, and
+the writer must mention them, as in the guide's example (`allocation` with 2 late orders). See DECISIONS.md D-006. Recommendations
 (`requires_approval=True`) are built by code from KPIs and changes. Until Ayush's tools land, use stub functions with the same signatures.
 
 ### `frontend/app.py` (Streamlit, calls the API only via httpx)

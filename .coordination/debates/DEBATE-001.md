@@ -52,3 +52,10 @@ accept `infeasible` for that phrasing (Ayush's file).
 
 ## #8: eval part not mine
 The unused `statistics` import in `eval/run_eval.py` is Shivang's file; repo-wide `ruff check .` already passes.
+
+## Resolved (Mudit)
+- #2: Codex's rule adopted. Explicit API weights beat parsed text (D-005). The UI omits weights at the 70/30 / 1.0
+  defaults, so "cheapest"/"greenest" in the request still apply when the sliders are untouched.
+- #6: current behaviour kept (D-006): late orders in a valid plan stay `allocation`/`scenario` and are listed in
+  limitations; `infeasible` only for unassigned orders, an unmet all-on-time request, or failed validation. The
+  guide's example is `allocation` with 2 late orders. TASK-003 line 105 updated.

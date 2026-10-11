@@ -158,9 +158,18 @@ def test_plain_allocate_keeps_slider_weights(ds):
 
 def test_cheapest_on_time_keeps_overrides(ds):
     deps, calls = _biased_llm_deps()
-    ask(ds, "Give me the cheapest plan that is on time", deps, weights={"cost": 0.7, "carbon": 0.3})
+    ask(ds, "Give me the cheapest plan that is on time", deps)      # no API weights: the grounded text applies
     w, kw = calls[0]
     assert (w.cost, w.carbon) == (1.0, 0.0) and kw["require_all_on_time"] is True
+
+
+def test_api_weights_beat_grounded_override(ds):
+    """D-005: explicit API weights win over parsed text, like the API scenario; the on-time flag still applies."""
+    deps, calls = _biased_llm_deps()
+    resp, _ = ask(ds, "Give me the cheapest plan that is on time", deps, weights={"cost": 0.5, "carbon": 0.5})
+    w, kw = calls[0]
+    assert (w.cost, w.carbon) == (0.5, 0.5) and kw["require_all_on_time"] is True
+    assert (resp.weights_used.cost, resp.weights_used.carbon) == (0.5, 0.5)
 
 
 # ---------------- tool paths + G3
@@ -307,7 +316,7 @@ def test_frontend_payload_and_chart():
     from shared.models import AnalyzeResponse
     p = build_payload("Plant B loses 30% capacity. Re-plan.", 70, 1.0, {"plant": "B", "capacity_loss_pct": 30})
     req = AnalyzeRequest(**p)
-    assert req.weights.cost == 0.7 and req.scenario.capacity_changes[0].plant == "B"
+    assert req.weights is None and req.scenario.capacity_changes[0].plant == "B"   # defaults are not sent
     plan = _plan(late=1)
     resp = AnalyzeResponse(run_id="al-x", answer_type=AnswerType.SCENARIO, summary="s", allocation=plan.assignments,
                            kpis=plan.kpis, tradeoff=[TradeoffPoint(carbon_cut_pct=c, cost=100 + c, carbon_t=10 - c,
@@ -593,3 +602,31 @@ def test_review1_g4_accepts_code_built_text(ds6, text):
     ask(ds6, text, deps)
     at, facts = seen[-1]
     assert guards.check_faithfulness(guards.template_summary(at, facts), facts, text)[0]
+
+
+@pytest.mark.parametrize("cost_pct,lateness,sent", [(70, 1.0, None), (50, 1.0, (0.5, 0.5, 1.0)),
+                                                    (70, 2.0, (0.7, 0.3, 2.0)), (100, 1.0, (1.0, 0.0, 1.0))])
+def test_frontend_sends_weights_only_when_changed(ds, cost_pct, lateness, sent):
+    """D-005: untouched sliders send no weights, so "cheapest" in the request reaches the solver through the API."""
+    from frontend.app import build_payload
+    p = build_payload("Give me the cheapest plan that is on time", cost_pct, lateness)
+    w = p.get("weights")
+    assert (None if w is None else (round(w["cost"], 4), round(w["carbon"], 4), w["lateness"])) == sent
+    deps, calls = _biased_llm_deps()
+    ask(ds, p["request"], deps, **{k: v for k, v in p.items() if k != "request"})
+    used = calls[0][0]
+    assert (used.cost, used.carbon) == ((1.0, 0.0) if sent is None else sent[:2])
+
+
+def test_g4_claim_roots_match_word_forms():
+    """Real qwen2.5 output (explain order 77) that was rejected because 'moving' was cut to 'movi' and the FACTS
+    sentence says 'moves'. Word forms of the same claim must match; a claim FACTS doesn't make must still fail."""
+    facts = {"order_id": "O-077", "chosen_plant": "D",
+             "counterfactuals": [{"alternative_plant": "C", "feasible": True, "order_cost_delta": "+116",
+                                  "plan_cost_delta": "+1,187"}],
+             "explanation": "O-077 is in Plant D. Plant C would be more expensive for this order (+116), but "
+                            "re-solving the whole plan changes total cost by +1,187, moves 27 other orders and "
+                            "makes O-065 late."}
+    assert _g4("Moving this order to Plant C would increase the cost by 116, but re-solving the whole plan "
+               "changes total cost by +1,187.", facts)
+    assert not _g4("Plant C would be cheaper for this order.", facts)

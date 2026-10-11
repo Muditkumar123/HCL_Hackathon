@@ -423,6 +423,11 @@ NO_LATE_RE = re.compile(
     r"\b(?:no|zero|none of the)\s+(?:\w+\s+){0,2}late\b|\bnothing (?:is|will be) late\b"
     r"|\b(?:all|every|each)\s+(?:\w+\s+){0,2}orders?\s+(?:\w+\s+){0,3}on[- ]time\b", re.IGNORECASE)
 SENTENCE_RE = re.compile(r"(?<=[.!?;])\s+|\n+")
+# claim words are compared by root, so "moving" in the text matches "moves" in FACTS
+CLAIM_ROOTS = ("mov", "shift", "reassign", "transfer", "relocat", "recommend", "should", "suggest", "advis", "cheap",
+               "expens", "costl", "pric", "green", "clean", "dirt", "low", "high", "least", "most", "best", "worst",
+               "better", "worse", "efficien", "optimal", "ideal", "prefer", "capacit", "spare", "plent", "unlimit",
+               "idle", "headroom")
 _PLANT_KEYS = {"plant", "from", "to", "chosen_plant", "alternative_plant", "from_plant", "to_plant"}
 
 
@@ -489,14 +494,20 @@ def _id_ok(i: tuple[str | None, str], known: set[tuple[str | None, str]]) -> boo
     return any(d == i[1] and (i[0] is None or p is None or p == i[0]) for p, d in known)
 
 
+def _claim_root(word: str) -> str:
+    w = word.lower()
+    return next((r for r in CLAIM_ROOTS if w.startswith(r)), w)
+
+
 def _claim_problems(sentence: str, plants: set[str], f: _Facts) -> list[str]:
     bad = []
     if NO_LATE_RE.search(sentence) and f.late != 0:
         bad.append(f"unsupported claim (late orders): '{sentence[:80]}'")
     if ACTION_RE.search(sentence) and EVERY_RE.search(sentence):
         bad.append(f"unsupported claim (plan-wide move): '{sentence[:80]}'")
-    stems = {m.group(0).lower()[:4] for m in CLAIM_RE.finditer(sentence)}
-    if plants and stems and not any(plants <= rp and all(s in rt for s in stems) for rp, rt in f.records):
+    roots = {_claim_root(m.group(0)) for m in CLAIM_RE.finditer(sentence)}
+    if plants and roots and not any(plants <= rp and all(re.search(rf"\b{r}", rt) for r in roots)
+                                    for rp, rt in f.records):
         bad.append(f"unsupported claim (plant {', '.join(sorted(plants))}): '{sentence[:80]}'")
     return bad
 
