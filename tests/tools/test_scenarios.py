@@ -35,6 +35,17 @@ def test_tradeoff_infeasible_cut_is_flagged(trap_ds):
     assert extra[0].carbon_t <= by_cut[0].carbon_t * (1 - extra[0].carbon_cut_pct / 100) + 1e-6
 
 
+def test_frontier_always_has_deepest_feasible_point(trap_ds):
+    pts = tradeoff_frontier(trap_ds, Weights(), cuts=(0, 1, 50))
+    feasible = [p for p in pts if p.feasible]
+    deepest = max(feasible, key=lambda p: p.carbon_cut_pct)
+    assert deepest.carbon_cut_pct not in (0, 1, 50)          # added even though nobody asked for it
+    assert 1 < deepest.carbon_cut_pct < 50
+    assert all(not p.feasible for p in pts if p.carbon_cut_pct > deepest.carbon_cut_pct)
+    assert deepest.carbon_t <= pts[0].carbon_t * (1 - deepest.carbon_cut_pct / 100) + 1e-6
+    assert deepest.implied_carbon_price_per_t is not None
+
+
 def test_counterfactual_eligibility_and_knock_on(trap_ds):
     base = solve_allocation(trap_ds, Weights())
     cf = counterfactual(trap_ds, base, "O-2", "A")
@@ -114,11 +125,14 @@ def test_graph_end_to_end(trap_ds, monkeypatch):
 
     deps = default_deps()
     deps.base_plan = lambda: None  # don't read whatever plan the backend DB has stored
-    for text, expected in [("Allocate this week's orders", AnswerType.ALLOCATION),
-                           ("What does a 10% carbon cut cost?", AnswerType.SCENARIO),
-                           ("Plant A loses 30% capacity. Re-plan.", AnswerType.SCENARIO),
-                           ("Why was order O-1 built in Plant C?", AnswerType.SCENARIO)]:
+    cut_ok = next(p.feasible for p in tradeoff_frontier(trap_ds, Weights(), cuts=(0, 10)) if p.carbon_cut_pct == 10)
+    for text, expected in [("Allocate this week's orders", {AnswerType.ALLOCATION}),
+                           # a cut beyond the deepest feasible one may be answered as INFEASIBLE (graph's choice)
+                           ("What does a 10% carbon cut cost?",
+                            {AnswerType.SCENARIO} if cut_ok else {AnswerType.SCENARIO, AnswerType.INFEASIBLE}),
+                           ("Plant A loses 30% capacity. Re-plan.", {AnswerType.SCENARIO}),
+                           ("Why was order O-1 built in Plant C?", {AnswerType.SCENARIO})]:
         resp, trace = run(AnalyzeRequest(request=text), trap_ds, deps)
-        assert resp.answer_type == expected, (text, resp.summary, resp.limitations)
+        assert resp.answer_type in expected, (text, resp.summary, resp.limitations)
         assert resp.validator is not None and resp.validator.capacity_ok, (text, resp.validator)
         assert os.environ["MOCK_LLM"] == "true" and trace.steps

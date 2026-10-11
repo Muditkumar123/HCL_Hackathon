@@ -20,10 +20,13 @@ from shared.models import (
 
 log = logging.getLogger(__name__)
 OK_STATUSES = ("OPTIMAL", "FEASIBLE")
+# A 'why' answer must isolate the knock-on of the forced order: every other order it moves has to be worth at least
+# one late order-day, otherwise the heuristic search reshuffles unrelated orders and the diff becomes noise.
+COUNTERFACTUAL_MOVE_PENALTY = 0.01
 
 
 def _signed(x: float) -> str:
-    return f"{'+' if x >= 0 else '-'}{abs(x):,.0f}"
+    return f"{round(x):+,d}"
 
 
 # ============================================================ trade-off frontier (epsilon-constraint)
@@ -36,10 +39,12 @@ def tradeoff_frontier(ds: Dataset, weights: Weights, cuts: Sequence[float] = (0,
     """Cost of cutting carbon by each percentage versus the unconstrained (0%) plan.
 
     For each cut c: re-solve with Σ carbon·x ≤ (1 - c/100) · carbon_0 (epsilon-constraint).
-    * First a minimum-carbon plan (carbon only, lateness allowed, no deferral beyond the 0% plan) gives the deepest
-      achievable cut. Then every cut is solved in parallel, warm-started from that plan. If a requested cut is
-      deeper than achievable, an extra point at the deepest achievable cut (rounded down to 0.1%) is added, so
-      the answer can say how far carbon can actually go and what it costs in money and late orders.
+    * First a minimum-carbon plan (carbon only, lateness allowed, no deferral beyond the 0% plan) estimates the
+      deepest achievable cut. Then every cut, and that deepest cut, is solved in parallel, warm-started from it.
+    * The result ALWAYS contains the deepest feasible cut as an explicit point: the largest cut any of these plans
+      reaches, rounded down to 0.1%. Read it as the feasible point with the largest carbon_cut_pct (a requested
+      cut between the rounded and the exact value is feasible too). Every point beyond it has feasible=False, so
+      the answer can say "a 10% cut is not achievable; the best is X% at +Y cost and Z late orders".
     * A cut is also infeasible if it would leave more orders unassigned than the 0% plan.
     * Monotone by construction: a plan that meets a deeper cut also meets every shallower one, so each point keeps
       the best plan (solver objective) among its own solve and every deeper feasible solve.
@@ -62,21 +67,25 @@ def tradeoff_frontier(ds: Dataset, weights: Weights, cuts: Sequence[float] = (0,
 
     def capped(cut: float, hint: list[OrderAssignment] | None = None) -> SolveResult:
         return solve_allocation(ds, weights, changes, carbon_cap_kg=k0_kg * (1 - cut / 100),
-                                time_limit_s=time_limit_s, hint=hint)
+                                time_limit_s=time_limit_s, hint=hint, portfolio=hint is None)
 
     min_carbon = solve_allocation(ds, green, changes, time_limit_s=time_limit_s)
     k_min_kg = _carbon_kg(min_carbon) if ok(min_carbon, float("inf")) else None
     hint = min_carbon.assignments if k_min_kg is not None else None
     todo = [c for c in wanted if c > 0]
-    if k_min_kg is not None and k0_kg > 0 and any(k0_kg * (1 - c / 100) < k_min_kg - tol_kg for c in wanted):
-        max_cut = math.floor((1 - k_min_kg / k0_kg) * 1000) / 10
-        if max_cut > 0 and max_cut not in wanted:
+    if k_min_kg is not None and k0_kg > 0:
+        max_cut = math.floor((1 - k_min_kg / k0_kg) * 1000 + 1e-9) / 10
+        if max_cut > 0 and max_cut not in todo:
             todo.append(max_cut)
     results: dict[float, SolveResult | None] = {0.0: base}
     with ThreadPoolExecutor(max_workers=max(1, min(len(todo), os.cpu_count() or 1, 8))) as pool:
         futures = {c: pool.submit(capped, c, hint) for c in todo}
         results.update({c: f.result() for c, f in futures.items()})
     candidates = [r for r in [*results.values(), min_carbon] if r is not None]
+    reached = [(1 - _carbon_kg(r) / k0_kg) * 100 for r in candidates if ok(r, float("inf"))] if k0_kg > 0 else []
+    deepest = max(0.0, math.floor(max(reached, default=0.0) * 10 + 1e-9) / 10)
+    if deepest > 0:
+        results.setdefault(deepest, None)
 
     objective = {id(r): plan_objective(ds, r.assignments, weights) for r in candidates if r.kpis is not None}
     best: dict[float, KPIs | None] = {}
@@ -96,8 +105,8 @@ def tradeoff_frontier(ds: Dataset, weights: Weights, cuts: Sequence[float] = (0,
                                     late_orders=k.late_orders, implied_carbon_price_per_t=price))
     if 0.0 not in wanted:
         points = [p for p in points if p.carbon_cut_pct != 0]
-    log.info("tradeoff_frontier points=%d feasible=%d max_cut=%s", len(points), sum(p.feasible for p in points),
-             None if k_min_kg is None else round((1 - k_min_kg / k0_kg) * 100, 2) if k0_kg else 0)
+    log.info("tradeoff_frontier points=%d feasible=%d deepest_cut=%.1f%%", len(points),
+             sum(p.feasible for p in points), deepest)
     return points
 
 
@@ -143,7 +152,7 @@ def compare_plans(ds: Dataset, base: SolveResult, new: SolveResult, changes: Seq
             parts.append(f"Same plant {n.plant}, production week {b.production_week} -> {n.production_week}.")
         cost_d, carbon_d = n.cost - b.cost, n.carbon_kg - b.carbon_kg
         if n.plant is not None and b.plant is not None:
-            parts.append(f"Order cost {_signed(cost_d)}, carbon {carbon_d:+,.0f} kg.")
+            parts.append(f"Order cost {_signed(cost_d)}, carbon {round(carbon_d):+,d} kg.")
         if b.on_time and not n.on_time and n.plant is not None:
             parts.append(f"Now {n.days_late} day{'s' if n.days_late != 1 else ''} late.")
         elif not b.on_time and n.on_time and b.plant is not None:
@@ -158,6 +167,8 @@ def compare_plans(ds: Dataset, base: SolveResult, new: SolveResult, changes: Seq
 def counterfactual(ds: Dataset, base: SolveResult, order_id: str, plant: str,
                    changes: Sequence[CapacityChange] = (), time_limit_s: float = 3.0) -> CounterfactualResult:
     """'What if order_id went to plant instead?' Re-solves the WHOLE plan with forced={order_id: plant}.
+    The forced solve starts from the base plan and charges COUNTERFACTUAL_MOVE_PENALTY per other order moved, so
+    displaced_orders are the orders the force really pushes out, not unrelated reshuffles.
 
     blocked_by:
       eligibility  the plant cannot make the product or ship to the destination
@@ -174,7 +185,7 @@ def counterfactual(ds: Dataset, base: SolveResult, order_id: str, plant: str,
         return res
 
     new = solve_allocation(ds, base.weights_used, changes, forced={order_id: plant}, base_plan=base.assignments,
-                           time_limit_s=time_limit_s)
+                           time_limit_s=time_limit_s, portfolio=False, move_penalty=COUNTERFACTUAL_MOVE_PENALTY)
     base_unassigned = base.kpis.unassigned_orders if base.kpis else 0
     if new.status not in OK_STATUSES or new.kpis is None or new.kpis.unassigned_orders > base_unassigned:
         res.blocked_by = "capacity"

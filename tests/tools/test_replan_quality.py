@@ -1,7 +1,10 @@
 """Re-plan quality and speed (from Shivang's eval: 'Plant B loses 30%' took late orders 12 -> 67).
 
 The invariant: deferring exactly the orders a capacity loss pushes off its plant is always feasible, so a re-plan
-must (a) score no worse than that repair and (b) not add more late-or-deferred orders than the loss forces off.
+must (a) score no worse than that repair on the solver objective and (b) carry no more lateness than it, measured in
+late order-days with a deferred order counted as DEFER_DAYS. A bound on the NUMBER of late orders is not an
+invariant: the objective prefers several orders a day or two late over one order deferred for weeks (on the real
+pack, a 30 s full search after Shivang's E-3 event has 22 late orders vs 8 before, although E-3 forces only 6 off).
 """
 
 from __future__ import annotations
@@ -21,6 +24,7 @@ from ai.tools.validator import validate_plan
 from shared.models import CapacityChange, Dataset, Weights
 
 RAW = Path(__file__).resolve().parents[2] / "data" / "raw"
+DEFER_DAYS = 12  # one deferral = one more week late + the 0.05 margin (5 late days), see solver.defer
 
 
 def forced_off(ds: Dataset, plan, changes) -> set[str]:
@@ -48,6 +52,11 @@ def late_or_deferred(plan) -> int:
     return sum(1 for a in plan if not a.on_time)
 
 
+def lateness_burden(plan) -> int:
+    """Late order-days, a deferred order counting DEFER_DAYS."""
+    return sum(DEFER_DAYS if a.plant is None else a.days_late for a in plan)
+
+
 def check_replan(ds: Dataset, changes, weights=Weights()):
     base = solve_allocation(ds, weights)
     new = solve_allocation(ds, weights, changes=changes, base_plan=base.assignments)
@@ -55,8 +64,9 @@ def check_replan(ds: Dataset, changes, weights=Weights()):
     repair = [unassigned(a.order_id, a.due) if a.order_id in off else a for a in base.assignments]
     assert validate_plan(ds, new.assignments, changes).capacity_ok
     assert plan_objective(ds, new.assignments, weights) <= plan_objective(ds, repair, weights) + 1e-6
-    added = late_or_deferred(new.assignments) - late_or_deferred(base.assignments)
-    assert added <= len(off), f"{added} more late/deferred orders, but the loss only forces {len(off)} off"
+    assert lateness_burden(new.assignments) <= lateness_burden(repair), (
+        f"re-plan carries {lateness_burden(new.assignments)} late order-days; deferring the {len(off)} orders the "
+        f"loss forces off would carry {lateness_burden(repair)}")
     return base, new, off
 
 
@@ -113,3 +123,7 @@ def test_real_pack_speed_and_replan():
     tradeoff_frontier(ds, Weights())
     assert time.perf_counter() - t0 < 10, "trade-off must take < 10 s"
     check_replan(ds, [CapacityChange(plant="B", capacity_loss_pct=30)])
+    e3 = [CapacityChange(plant="E", capacity_loss_pct=50, from_date="2026-10-12", to_date="2026-10-25")]
+    _, new, _ = check_replan(ds, e3)  # Shivang's late-drop dry run
+    fresh = solve_allocation(ds, Weights(), changes=e3)
+    assert plan_objective(ds, new.assignments, Weights()) <= plan_objective(ds, fresh.assignments, Weights()) + 1e-6

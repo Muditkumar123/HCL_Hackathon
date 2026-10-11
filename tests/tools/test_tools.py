@@ -49,7 +49,7 @@ def test_capacity_modes_and_assumptions(trap_ds):
 def test_effective_capacity_applies_events_and_changes(trap_ds):
     trap_ds.capacity_events = pd.DataFrame([("E-1", "A", "2026-10-12", "2026-10-14", 50)],
                                            columns=["event_id", "plant", "from_date", "to_date", "capacity_loss_pct"])
-    cap = effective_capacity(trap_ds, [CapacityChange(plant="A", capacity_loss_pct=0.2)])  # 0.2 -> 20%
+    cap = effective_capacity(trap_ds, [CapacityChange(plant="A", capacity_loss_pct=20)])
     a = cap[cap["plant"] == "A"].set_index("week_start")["capacity"]
     assert a[date(2026, 10, 5)] == pytest.approx(800)
     assert a[date(2026, 10, 12)] == pytest.approx(1000 * 0.5 * 0.8)
@@ -163,3 +163,17 @@ def test_validator_catches_ineligible_and_late(trap_ds):
     base = cheapest_plant_plan(trap_ds)
     v2 = validate_plan(trap_ds, base)
     assert not v2.delivery_ok and any("O-1 arrives" in x for x in v2.violations)
+
+
+def test_replan_report_before_after(trap_ds):
+    from dataclasses import replace
+
+    from ai.tools.replan_report import replan_report, to_markdown
+
+    events = pd.DataFrame([("E-9", "A", "2026-10-05", "2026-10-18", 70.0)],
+                          columns=["event_id", "plant", "from_date", "to_date", "capacity_loss_pct"])
+    rep = replan_report(trap_ds, replace(trap_ds, capacity_events=events))
+    assert rep["validator_after"].capacity_ok and rep["validator_before"].capacity_ok
+    assert any(c.from_plant == "A" for c in rep["changes"])
+    md = to_markdown(rep, "drill")
+    assert "| Before |" in md and "| After (re-plan) |" in md and "orders changed plant" in md

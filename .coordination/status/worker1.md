@@ -3,8 +3,9 @@
 ## Task: TEST-001
 **Status:** DONE
 
-## Task: TASK-001 decision tools (`ai/tools/`, `tests/tools/`)
-**Status:** DONE (Step 1 + Step 2), including the fixes from Shivang's eval (speed, re-plan lateness).
+## Task: TASK-001 decision tools (`ai/tools/`, `tests/tools/`, `docs/solver.md`)
+**Status:** DONE (Step 1 + Step 2 + Shivang's eval fixes + round 2 below). Late data drop: tool ready, **waiting for
+the real file** (dry run recorded below).
 
 | Part | File | Status |
 |---|---|---|
@@ -13,52 +14,63 @@
 | Validator (independent re-check) | `ai/tools/validator.py` | DONE |
 | Baseline `cheapest_plant_plan` | `ai/tools/baseline.py` | DONE |
 | `tradeoff_frontier`, `compare_plans`, `counterfactual`, `share_not_at_cheapest_plant` | `ai/tools/scenarios.py` | DONE |
-| Tests: 34 (trap fixture, synthetic 150 orders, real pack, graph end-to-end) | `tests/tools/` | PASSING |
+| Late-drop before/after report | `ai/tools/replan_report.py` | DONE |
+| Model write-up + 5 judge Q&As (for README / judges) | `docs/solver.md` | DONE |
+| Tests: 36 (trap fixture, synthetic 150 orders, real pack, graph end-to-end) | `tests/tools/` | PASSING |
 
-Signatures match `ai/graph.py default_deps()` exactly; extra keyword arguments are optional
-(`time_limit_s`, `horizon_weeks`, `hint` on the solver; `changes`/`forced` on `compare_plans`; `changes`, `time_limit_s` on
-`counterfactual`).
+Signatures match `ai/graph.py default_deps()` exactly. Extra keyword arguments are optional: `time_limit_s`,
+`horizon_weeks`, `hint`, `portfolio`, `move_penalty` on the solver; `changes`/`forced` on `compare_plans`; `changes`,
+`time_limit_s` on `counterfactual`.
 
-**Run:** `MOCK_LLM=true python -m pytest tests/tools -q` (34 passed, ~16 s) · `ruff check ai/tools tests/tools` clean.
+**Run:** `MOCK_LLM=true pytest tests/tools -q` (36 passed, ~25 s) · `ruff check ai/tools tests/tools` clean.
 
-### Real pack (`data/raw`: 120 orders, 5 plants, 4 weeks, 1,592 options), default weights 0.7/0.3
+### Real pack (`data/raw`, data_version e543801d: 120 orders, 5 plants, 4 weeks, 1,592 options), weights 0.7/0.3
 | | Result |
 |---|---|
-| Main plan | **1.2 s**, FEASIBLE (root node + local search, deterministic), within 4.7% of SCIP's proven lower bound; validator: capacity ok, eligibility ok |
-| KPIs | cost 285,685 · carbon 19.7 t · 11 late (16 late order-days) · 0 unassigned · utilisation 86–96% |
-| Baseline (cheapest plant) | cost 266,355 · carbon 24.4 t · **88 late** · 3 capacity overloads |
-| Orders NOT at their cheapest eligible plant | **59%** (a per-order "it was cheapest" explanation would be wrong for these) |
-| Trade-off frontier | **5.9 s**. Deepest achievable cut **3.8%**: +6,414 cost, 61 late, implied **8,496 per t**. 5%+ cuts are infeasible within capacity (checked with a 15 s full search: needs deferring orders) |
-| Re-plan "B loses 30%" (all weeks) | 3.2 s · 20 late (was 67) · 3 deferred · 20 plant moves. The loss forces 12 orders off B; late+deferred rose by 12 |
-| Counterfactual | ~1.2 s per alternative plant (3 s limit) |
+| Main plan | **1.4 s**, FEASIBLE (deterministic), within 3.1% of SCIP's proven lower bound; validator: capacity ok, eligibility ok |
+| KPIs | cost 285,583 · carbon 19.8 t · **9 late** (13 late order-days) · 0 deferred · utilisation 86–96% |
+| Baseline (cheapest plant) | cost 266,355 · carbon 24.4 t · **88 late** · **3 overloaded slots** (A wk 2 Nov: 13,469 units vs 1,275) |
+| Orders NOT at their cheapest eligible plant | **58%** (70 of 120) |
+| Trade-off frontier | **6.2 s**. Deepest achievable cut **5.4%**: +4,003 cost, 49 late, implied **3,727 per t** (money only). 10%+ not achievable |
+| Re-plan "B loses 30%" (all weeks) | 3.9 s · 9 → **22 late** (was 67 before the fix) · 1 deferred · 32 plant changes · validator ok |
+| "Why" counterfactual | 2.3 s for 3 alternative plants; 3–5 orders displaced each |
 
-### What changed after Shivang's eval
-1. **Speed.** MIP gap 0.5%; horizon limited to the weeks due dates need (+1 late week); greedy warm start; big models stop after
-   the SCIP root node (full branch-and-bound did not beat it in 20 s), then deterministic local search; 3 s limit for
-   trade-off points and counterfactuals; trade-off cuts run in parallel threads; results memoised on table contents.
-2. **Re-plan 12 -> 67 late.** The cause was the flat 1000 "unassigned" penalty, not the lateness weight: one deferred order
-   was worth about 100,000 late order-days, so the solver made dozens of orders late to fit one more order into the
-   horizon. Now a deferred order costs its worst in-horizon option + one more week of lateness + 0.05. Answers to the
-   eval's questions:
-   - Loss only in the event's weeks? `capacity_events` rows and dated `CapacityChange`s apply only to overlapping weeks.
-     A `CapacityChange` with no dates applies to every week (contract: "None => whole horizon"); "Plant B loses 30%"
-     parses that way.
-   - Lateness vs cost: one late order-day = 1% of total normalised cost ≈ 3,800 here, more than an average order's
-     whole cost (~2,400). Test: `test_lateness_outweighs_cost_savings`.
-   - Minimal-change penalty: 0.001 per moved order = one tenth of one late day. Test:
-     `test_minimal_change_penalty_never_beats_lateness`.
-   - New test `test_replan_quality.py`: a re-plan must score no worse than deferring exactly the orders the loss forces
-     off, and must not add more late-or-deferred orders than that (trap, synthetic and real pack).
+Numbers changed since round 1 (3.8% at 8,496/t, 59%, 11 late) because the search improved; see `docs/solver.md` §9.
+
+### Late data drop
+**Real drop: not received yet** (`data/raw/capacity_events.csv` and the DB still hold only E-1, E-2). When it lands:
+`python -m ai.tools.replan_report <new capacity_events.csv> --mode replace` (or `--mode append` if the file holds only
+the new events), then paste the table here. The live path stays Shivang's `scripts/late_drop.py`.
+
+#### Dry run (not the real drop): Shivang's drill event E-3 appended (Plant E −50%, 12–25 Oct)
+| Plan | Cost | Carbon (t) | Late orders | Deferred | Solve | Validator |
+|---|---|---|---|---|---|---|
+| Before | 285,583 | 19.8 | 9 (13 days) | 0 | 1.5 s | capacity_ok=True, eligibility_ok=True |
+| After (re-plan) | 283,901 | 20.2 | 19 (35 days) | 0 | 2.4 s | capacity_ok=True, eligibility_ok=True |
+
+Change: cost −1,682, carbon +0.4 t, late 9 → 19, 36 orders changed plant or on-time status. E-3 takes 800 units out of
+the two earliest weeks, the bottleneck for orders due first. Cost falls because some orders that are now late anyway
+stop paying for an expensive on-time route. A 30 s full search does no better (22 late), so this is not a weighting
+problem (answer to Shivang's "lateness may be under-weighted" note).
+
+### Round 2 changes
+1. **Frontier always includes the deepest feasible cut** as its own point: the feasible point with the largest
+   `carbon_cut_pct`. Every cut beyond it has `feasible=False`. Test: `test_frontier_always_has_deepest_feasible_point`.
+2. **Warm-start portfolio** (parallel threads): main plan 2 starts; re-plans 5, including two that ignore the old plan
+   and are re-scored with the move penalty, so a re-plan is never worse than a fresh plan. Base plan 11 → 9 late;
+   E-3 re-plan 24 → 19 late.
+3. **Move penalty** 0.001 → 0.0001 (100 moved orders = one late day). At 0.001, about 50 moves outweighed 5 late days.
+   The "why" counterfactual uses 0.01 per move and one warm start, so its knock-on list shows only orders the force
+   really displaces (was up to 26 unrelated reshuffles).
+4. **Re-plan test corrected:** a bound on the NUMBER of late orders is not an invariant. On E-3 even a 30 s full search
+   adds 14 late orders while only 6 are forced off, because the objective prefers several orders 1–2 days late over
+   one deferred for weeks. The test now checks (a) objective no worse than deferring the forced-off orders and
+   (b) late order-days (a deferral counted as 12) no worse than that. It runs on trap, synthetic, real pack B −30%,
+   and E-3.
 
 ### Needs action from others
-- **Mudit (`ai/generation/guards.py` template):** an infeasible `TradeoffPoint` has `cost=0`, so the template says
-  "A 10% carbon cut costs -285,685 more". Please check `feasible` and use the extra deepest-cut point (e.g. 3.8%) to say
-  "a 10% cut is not possible within capacity; the most is 3.8% at +6,414 and 61 late orders".
-- **Mudit (`ai/graph.py`):** `replan` could pass the changes to `compare(ds, base, new, changes=ch)` so each reason says
-  "Plant B loses 30% capacity"; `allocate` could pass `forced=it.force_assignments`. Both keyword args are optional.
-- **Mudit:** `pytest tests/` fails at collection (`No module named 'ai'`); `python -m pytest tests/` works. A root
-  `conftest.py` (or `pythonpath = .` in a pytest config) fixes it.
-- **Shivang (`backend/store.latest_plan`):** it returns the last saved plan even after the data changes (I saw a stored
-  plan whose order ids did not match the current data). Please filter by `data_version`, otherwise explain/re-plan
-  compare against a stale plan.
-- Assumptions for the response: `ai.tools.cost_model.assumptions_for(ds)` returns formulas + capacity mode per plant.
+- **Mudit (`ai/graph.py`):** `replan` could call `compare(ds, base, new, changes=ch)` so each reason starts with
+  "Plant B loses 30% capacity."; `allocate` could pass `forced=it.force_assignments`. Both are optional keyword args.
+- **Mudit:** the infeasible-cut wording ("not feasible ... deepest feasible cut is 5.4%") is in your working copy and
+  matches the frontier contract above; it is not committed yet.
+- Resolved: plain `pytest tests/` now collects (201 passed); `latest_plan` filters by `data_version` (thanks Shivang).

@@ -19,18 +19,20 @@ Constraints
 
 Objective (minimise)
     w.cost · Σ cost·x / C_ref  +  w.carbon · Σ carbon·x / K_ref  +  w.lateness · 0.01 · Σ days_late·x
-    + Σ defer[o]·u[o]  [+ 0.001 · (orders moved from base_plan)]
+    + Σ defer[o]·u[o]  [+ 0.0001 · (orders moved from base_plan)]
     C_ref = Σ_o min cost[o], K_ref = Σ_o min carbon[o], so both normalised terms are about 1.0 and the
     weights mean what they say. One late order-day costs as much as 1% of total cost (about 1.4x an average
     order's own cost on the 120-order pack), so the plan never makes an order late to save money on it.
     defer[o] = o's worst in-horizon option + one more week of lateness + 0.05: deferring is always worse than
     producing late, but not so much worse that the solver makes dozens of orders late to avoid one deferral
-    (a flat big-M did exactly that). The base-plan term (a tenth of one late day) only breaks near-ties in
-    favour of minimal change when re-planning; it never outweighs lateness.
+    (a flat big-M did exactly that). The base-plan term (100 moved orders = one late order-day) only breaks
+    near-ties in favour of minimal change when re-planning; it never outweighs lateness.
 
 Search strategy (measured on the 120-order pack: full branch-and-bound does not beat the root node in 20 s)
-    1. A greedy warm start (forced orders, then base-plan / hinted placements that still fit, then the rest by due
-       date at their lowest-objective option that fits) is passed to SCIP as a hint.
+    1. A greedy warm start (forced orders, then base-plan / hinted placements that still fit, then the rest at their
+       lowest-objective option that fits) is passed to SCIP as a hint. Large models run a portfolio of warm starts in
+       parallel threads (keep base placements / by due date / largest order first) and keep the best plan: a
+       re-plan seeded only from the old plan tends to get stuck next to it.
     2. Models with more than FULL_SEARCH_MAX_OPTIONS options stop after the root node: deterministic, about 2 s,
        status FEASIBLE with the gap to SCIP's proven lower bound in `notes`. Smaller models are solved to optimality.
     3. A non-optimal plan is polished by deterministic local search (relocate one order; or move one order into a
@@ -50,6 +52,7 @@ import threading
 import time
 from collections import OrderedDict, defaultdict
 from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 import pandas as pd
@@ -65,7 +68,7 @@ log = logging.getLogger(__name__)
 UNASSIGNED_PENALTY = 1000.0  # only for orders with no eligible option at all (u is forced to 1 anyway)
 DEFER_MARGIN = 0.05
 LATE_DAY_WEIGHT = 0.01
-MOVE_PENALTY = 0.001
+MOVE_PENALTY = 0.0001  # 100 moved orders weigh as much as one late order-day
 WEEK_TIEBREAK = 1e-7  # prefer earlier production weeks among exact ties (deterministic plans)
 CACHE_SIZE = 64
 MIP_GAP = 0.005
@@ -81,22 +84,29 @@ def solve_allocation(ds: Dataset, weights: Weights, changes: Sequence[CapacityCh
                      carbon_cap_kg: float | None = None, require_all_on_time: bool = False,
                      base_plan: list[OrderAssignment] | None = None,
                      forced: dict[str, str] | None = None, time_limit_s: float = 10.0,
-                     horizon_weeks: int | None = None, hint: list[OrderAssignment] | None = None) -> SolveResult:
+                     horizon_weeks: int | None = None, hint: list[OrderAssignment] | None = None,
+                     portfolio: bool = True, move_penalty: float = MOVE_PENALTY) -> SolveResult:
     """Optimal allocation of every order to (plant, week). See the module docstring for the MIP.
 
     `hint` is a plan whose placements the warm start keeps where they fit (speed only; not memoised).
+    `portfolio=False` runs only the first warm start (callers that already solve many models in parallel).
+    `move_penalty` is the objective charge per order moved off its base_plan plant (counterfactuals use more).
     """
     t0 = time.perf_counter()
     try:
         key = None if hint else _cache_key(ds, weights, changes, carbon_cap_kg, require_all_on_time, base_plan,
-                                           forced, time_limit_s, horizon_weeks)
+                                           forced, time_limit_s, horizon_weeks, (portfolio, move_penalty))
         with _cache_lock:
             if key in _cache:
                 _cache.move_to_end(key)
                 log.debug("solve_allocation cache hit")
                 return _cache[key].model_copy(deep=True)
-        res = _solve(ds, weights, list(changes), carbon_cap_kg, require_all_on_time, base_plan, forced or {},
-                     time_limit_s, horizon_weeks, hint, t0)
+        args = (ds, weights, list(changes), carbon_cap_kg, require_all_on_time, base_plan, forced or {},
+                time_limit_s, horizon_weeks, hint, t0, move_penalty)
+        if not portfolio or len(build_options(ds, horizon_weeks)) <= FULL_SEARCH_MAX_OPTIONS:
+            res = _solve(*args, warm="prefer" if hint or base_plan else "due")
+        else:
+            res = _portfolio(args, seeded=bool(hint or base_plan))
         if key is not None and res.status != "ERROR":
             with _cache_lock:
                 _cache[key] = res.model_copy(deep=True)
@@ -107,6 +117,42 @@ def solve_allocation(ds: Dataset, weights: Weights, changes: Sequence[CapacityCh
         log.exception("solve_allocation failed")
         return SolveResult(status="ERROR", assignments=[], solve_s=round(time.perf_counter() - t0, 3),
                            weights_used=weights, notes=[f"Solver error: {type(exc).__name__}: {exc}"])
+
+
+def _portfolio(args: tuple, seeded: bool) -> SolveResult:
+    """Solve with several warm starts in parallel threads (SCIP releases the GIL) and keep the lowest objective.
+
+    With a base plan, two more runs ignore it entirely ('unseeded-*'); their objective is re-scored with the move
+    penalty, so a re-plan is never worse than a fresh plan on the re-plan objective. Deterministic: each run is,
+    and ties go to the first strategy.
+    """
+    base_plan = args[5]
+    strategies = ((["prefer", "due", "size"] + (["unseeded-due", "unseeded-size"] if base_plan else []))
+                  if seeded else ["due", "size"])
+
+    def run(st: str) -> SolveResult:
+        if not st.startswith("unseeded"):
+            return _solve(*args, warm=st)
+        res = _solve(*args[:5], None, *args[6:9], None, *args[10:], warm=st.split("-")[1])
+        base_plant = {a.order_id: a.plant for a in base_plan or [] if a.plant is not None}
+        base_week = {a.order_id: a.production_week for a in base_plan or []}
+        moved = 0
+        for a in res.assignments:
+            a.changed = base_plant.get(a.order_id) != a.plant or base_week.get(a.order_id) != a.production_week
+            moved += a.order_id in base_plant and a.plant is not None and a.plant != base_plant[a.order_id]
+        if res.objective is not None:
+            res.objective = round(res.objective + args[11] * moved, 6)
+        return res
+
+    with ThreadPoolExecutor(max_workers=len(strategies)) as pool:
+        results = list(pool.map(run, strategies))
+    ok = [(r.objective, k, r) for k, r in enumerate(results) if r.status in ("OPTIMAL", "FEASIBLE")]
+    if not ok:
+        return results[0]
+    _, k, best = min(ok, key=lambda t: (t[0], t[1]))
+    best.notes.append(f"Best of {len(strategies)} warm starts ({', '.join(strategies)}): '{strategies[k]}'.")
+    log.debug("portfolio objectives %s", {s: r.objective for s, r in zip(strategies, results)})
+    return best
 
 
 def _fingerprint(ds: Dataset) -> str:
@@ -122,8 +168,8 @@ def _fingerprint(ds: Dataset) -> str:
 
 def _cache_key(ds: Dataset, weights: Weights, changes: Sequence[CapacityChange], carbon_cap_kg: float | None,
                require_all_on_time: bool, base_plan: list[OrderAssignment] | None, forced: dict[str, str] | None,
-               time_limit_s: float, horizon_weeks: int | None) -> str:
-    parts = [_fingerprint(ds), weights.model_dump_json(), [c.model_dump_json() for c in changes], carbon_cap_kg,
+               time_limit_s: float, horizon_weeks: int | None, variant: tuple) -> str:
+    parts = [_fingerprint(ds), weights.model_dump_json(), [c.model_dump_json() for c in changes], carbon_cap_kg, variant,
              require_all_on_time, sorted((forced or {}).items()), time_limit_s, horizon_weeks,
              [(a.order_id, a.plant, str(a.production_week)) for a in base_plan] if base_plan else None]
     return hashlib.sha1(repr(parts).encode()).hexdigest()
@@ -134,8 +180,8 @@ def clear_cache() -> None:
         _cache.clear()
 
 
-def _coefficients(opts: pd.DataFrame, weights: Weights,
-                  base_plan: list[OrderAssignment] | None = None) -> np.ndarray:
+def _coefficients(opts: pd.DataFrame, weights: Weights, base_plan: list[OrderAssignment] | None = None,
+                  move_penalty: float = MOVE_PENALTY) -> np.ndarray:
     """Objective coefficient of each option row (see the module docstring)."""
     if opts.empty:
         return np.zeros(0)
@@ -149,13 +195,13 @@ def _coefficients(opts: pd.DataFrame, weights: Weights,
     if base_plan:
         base_plant = {a.order_id: a.plant for a in base_plan if a.plant is not None}
         moved = [oid in base_plant and plant != base_plant[oid] for oid, plant in zip(opts["order_id"], opts["plant"])]
-        coef = coef + MOVE_PENALTY * np.asarray(moved, dtype=float)
+        coef = coef + move_penalty * np.asarray(moved, dtype=float)
     return coef
 
 
 def _greedy_start(opts: pd.DataFrame, coef: np.ndarray, key_of: list[tuple], limits: dict[tuple, float],
                   qty: np.ndarray, order_ids: list[str], due: dict, forced: dict[str, str],
-                  prefer: dict[str, tuple]) -> set[int]:
+                  prefer: dict[str, tuple], order_by: str = "due") -> set[int]:
     """Option rows of a capacity-feasible starting plan (ignores the carbon cap). Order: forced orders, then
     preferred placements that still fit, then the rest by due date (largest first) at their lowest-objective
     option that fits. Orders that fit nowhere stay unassigned."""
@@ -181,8 +227,10 @@ def _greedy_start(opts: pd.DataFrame, coef: np.ndarray, key_of: list[tuple], lim
     for oid, (p, w) in prefer.items():
         if oid not in done and oid not in forced:
             take(oid, [i for i in rows[oid] if plant[i] == p and week[i] == w])
-    for oid in sorted((o for o in order_ids if o not in done and o not in forced),
-                      key=lambda o: (str(due[o]), -float(qty[rows[o][0]]) if rows[o] else 0.0, o)):
+    size = {o: float(qty[rows[o][0]]) if rows[o] else 0.0 for o in order_ids}
+    key = ((lambda o: (-size[o], str(due[o]), o)) if order_by == "size"
+           else (lambda o: (str(due[o]), -size[o], o)))
+    for oid in sorted((o for o in order_ids if o not in done and o not in forced), key=key):
         take(oid, sorted(rows[oid], key=lambda i: coef[i]))
     return chosen
 
@@ -323,7 +371,7 @@ def _infeasible(weights: Weights, t0: float, notes: list[str]) -> SolveResult:
 def _solve(ds: Dataset, weights: Weights, changes: list[CapacityChange], carbon_cap_kg: float | None,
            require_all_on_time: bool, base_plan: list[OrderAssignment] | None, forced: dict[str, str],
            time_limit_s: float, horizon_weeks: int | None, hint: list[OrderAssignment] | None,
-           t0: float) -> SolveResult:
+           t0: float, move_penalty: float = MOVE_PENALTY, warm: str = "prefer") -> SolveResult:
     orders = ds.orders.assign(order_id=ds.orders["order_id"].astype(str))
     order_ids = list(orders["order_id"])
     due = dict(zip(order_ids, orders["due"]))
@@ -389,7 +437,7 @@ def _solve(ds: Dataset, weights: Weights, changes: list[CapacityChange], carbon_
         solver.Add(sum(x[i] for i in by_order[oid] if opts.at[i, "plant"] == plant) == 1)
 
     # ---- objective
-    coef = _coefficients(opts, weights, base_plan)
+    coef = _coefficients(opts, weights, base_plan, move_penalty)
     base_plant = {a.order_id: a.plant for a in (base_plan or []) if a.plant is not None}
     objective = solver.Objective()
     for i, v in enumerate(x):
@@ -399,8 +447,10 @@ def _solve(ds: Dataset, weights: Weights, changes: list[CapacityChange], carbon_
     objective.SetMinimization()
 
     # ---- warm start + search
-    prefer = {a.order_id: (a.plant, a.production_week) for a in (hint or base_plan or []) if a.plant is not None}
-    start = _greedy_start(opts, coef, key_of, limits, qty, order_ids, due, forced, prefer)
+    prefer = ({a.order_id: (a.plant, a.production_week) for a in (hint or base_plan or []) if a.plant is not None}
+              if warm == "prefer" else {})
+    start = _greedy_start(opts, coef, key_of, limits, qty, order_ids, due, forced, prefer,
+                          order_by="size" if warm == "size" else "due")
     started = {opts.at[i, "order_id"] for i in start}
     solver.SetHint(x + list(u.values()),
                    [1.0 if i in start else 0.0 for i in range(len(x))] + [0.0 if o in started else 1.0 for o in u])
