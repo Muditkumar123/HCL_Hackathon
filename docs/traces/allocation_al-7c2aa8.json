@@ -1,0 +1,110 @@
+{
+  "run_id": "al-7c2aa8",
+  "request": "Allocate all orders; a cheap plant must not be selected if it misses the due date.",
+  "answer_type": "allocation",
+  "steps": [
+    {
+      "agent": "guard",
+      "tool": "input_guard",
+      "input": null,
+      "output": null,
+      "check": "pass",
+      "duration_ms": 2.1,
+      "ts": "2026-10-11T08:34:14.635818Z"
+    },
+    {
+      "agent": "router",
+      "tool": "parse_intent",
+      "input": null,
+      "output": {
+        "intent": "allocate",
+        "parsed_by": "llm",
+        "reason": "Prioritize cost efficiency only if on-time delivery is guaranteed."
+      },
+      "check": null,
+      "duration_ms": 3425.4,
+      "ts": "2026-10-11T08:34:18.061833Z"
+    },
+    {
+      "agent": "guard",
+      "tool": "intent_guard",
+      "input": null,
+      "output": null,
+      "check": "pass (1 fixes)",
+      "duration_ms": 1.2,
+      "ts": "2026-10-11T08:34:18.064985Z"
+    },
+    {
+      "agent": "optimiser",
+      "tool": "solve_allocation",
+      "input": {
+        "weights": {
+          "cost": 0.7,
+          "carbon": 0.3,
+          "lateness": 1.0
+        },
+        "require_all_on_time": false
+      },
+      "output": {
+        "status": "FEASIBLE",
+        "solve_s": 1.194
+      },
+      "check": null,
+      "duration_ms": 1211.7,
+      "ts": "2026-10-11T08:34:19.278041Z"
+    },
+    {
+      "agent": "checker",
+      "tool": "validate_plan",
+      "input": null,
+      "output": {
+        "capacity_ok": true,
+        "eligibility_ok": true,
+        "delivery_ok": false,
+        "violations": [
+          "O-020 arrives 2 days late at FR (flagged)",
+          "O-028 arrives 1 days late at UK (flagged)",
+          "O-052 arrives 1 days late at FR (flagged)",
+          "O-065 arrives 1 days late at FR (flagged)",
+          "O-068 arrives 15 days late at UK (flagged)",
+          "O-071 arrives 1 days late at DE (flagged)",
+          "O-090 arrives 1 days late at IN (flagged)",
+          "O-111 arrives 1 days late at US (flagged)",
+          "O-117 arrives 2 days late at BR (flagged)",
+          "O-120 arrives 1 days late at US (flagged)"
+        ]
+      },
+      "check": null,
+      "duration_ms": 80.7,
+      "ts": "2026-10-11T08:34:19.360549Z"
+    },
+    {
+      "agent": "writer",
+      "tool": "write_summary",
+      "input": {
+        "attempt": 1
+      },
+      "output": null,
+      "check": null,
+      "duration_ms": 1498.6,
+      "ts": "2026-10-11T08:34:20.859635Z"
+    },
+    {
+      "agent": "guard",
+      "tool": "faithfulness",
+      "input": null,
+      "output": {
+        "unmatched": []
+      },
+      "check": "faithfulness: pass (13/13 numbers matched)",
+      "duration_ms": 0.3,
+      "ts": "2026-10-11T08:34:20.861221Z"
+    }
+  ],
+  "llm_calls": 2,
+  "tokens": 1005,
+  "latency_ms": 6290.3,
+  "data_version": "e543801d",
+  "approval_status": "pending",
+  "created_at": "2026-10-11T08:34:20.863218Z"
+}
