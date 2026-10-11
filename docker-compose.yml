@@ -1,12 +1,12 @@
-# Ollama runs on the host and listens on 127.0.0.1 only, so both services use the host network
-# (api on :8000, ui on :8501) and reach Ollama at http://localhost:11434.
+# Ollama runs on the host (GPU 1, port 11435) and listens on 127.0.0.1 only, so both services use the host
+# network (api on :8000, ui on :8501) and reach Ollama at http://localhost:11435.
 services:
   api:
     build: .
     network_mode: host
     env_file: .env
     environment:
-      OLLAMA_BASE_URL: http://localhost:11434
+      OLLAMA_BASE_URL: http://localhost:11435
     volumes:
       - appdata:/app/data
     restart: unless-stopped
