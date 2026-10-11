@@ -1,4 +1,5 @@
-# Eval cases for POST /analyze. `expect` lists acceptable answer_types; nothing here is an answer:
+# Team eval cases for POST /analyze. `expect` lists acceptable answer_types; carbon-cut cases add conditions
+# (format: eval/run_eval.py docstring). Nothing here is an answer:
 # every number is produced by the solver at run time and checked by eval/run_eval.py.
 cases:
   - {id: alloc-01, request: "Allocate this week's orders", expect: [allocation]}
@@ -7,10 +8,52 @@ cases:
   - {id: alloc-04, request: "Allocate the orders with carbon weighted heavily",
      weights: {cost: 0.3, carbon: 0.7}, expect: [allocation]}
   - {id: alloc-05, request: "Allocate orders, cost only", weights: {cost: 1.0, carbon: 0.0}, expect: [allocation]}
-  - {id: trade-01, request: "What does a 10% carbon cut cost?", expect: [scenario]}
+  - id: trade-01
+    category: trade
+    request: "What does a 10% carbon cut cost?"
+    expected:
+      answer_type: [scenario, infeasible]
+      conditions:   # data-robust: a feasible cut that costs more and emits less, OR an honest "infeasible"
+        - any_of:
+            - - {path: tradeoff, where: {carbon_cut_pct: 10.0}, field: feasible, op: eq, value: true}
+              - {path: tradeoff, where: {carbon_cut_pct: 10.0}, field: cost, op: gt,
+                 value_from: {path: tradeoff, where: {carbon_cut_pct: 0.0}, field: cost}}
+              - {path: tradeoff, where: {carbon_cut_pct: 10.0}, field: carbon_t, op: lt,
+                 value_from: {path: tradeoff, where: {carbon_cut_pct: 0.0}, field: carbon_t}}
+            - - {path: answer_type, op: eq, value: infeasible}
+              - {path: summary, op: contains,
+                 value_from: {path: tradeoff, where: {feasible: true}, field: carbon_cut_pct, agg: max, format: pct}}
   - {id: trade-02, request: "Show the cost and carbon trade-off", expect: [scenario]}
-  - {id: trade-03, request: "How much more would a 20% CO2 reduction cost us?", expect: [scenario]}
-  - {id: trade-04, request: "What is the cost of cutting emissions by 5%?", expect: [scenario]}
+  - id: trade-03
+    category: trade
+    request: "How much more would a 20% CO2 reduction cost us?"
+    expected:
+      answer_type: [scenario, infeasible]
+      conditions:   # data-robust: a feasible cut that costs more and emits less, OR an honest "infeasible"
+        - any_of:
+            - - {path: tradeoff, where: {carbon_cut_pct: 20.0}, field: feasible, op: eq, value: true}
+              - {path: tradeoff, where: {carbon_cut_pct: 20.0}, field: cost, op: gt,
+                 value_from: {path: tradeoff, where: {carbon_cut_pct: 0.0}, field: cost}}
+              - {path: tradeoff, where: {carbon_cut_pct: 20.0}, field: carbon_t, op: lt,
+                 value_from: {path: tradeoff, where: {carbon_cut_pct: 0.0}, field: carbon_t}}
+            - - {path: answer_type, op: eq, value: infeasible}
+              - {path: summary, op: contains,
+                 value_from: {path: tradeoff, where: {feasible: true}, field: carbon_cut_pct, agg: max, format: pct}}
+  - id: trade-04
+    category: trade
+    request: "What is the cost of cutting emissions by 5%?"
+    expected:
+      answer_type: [scenario, infeasible]
+      conditions:   # data-robust: a feasible cut that costs more and emits less, OR an honest "infeasible"
+        - any_of:
+            - - {path: tradeoff, where: {carbon_cut_pct: 5.0}, field: feasible, op: eq, value: true}
+              - {path: tradeoff, where: {carbon_cut_pct: 5.0}, field: cost, op: gt,
+                 value_from: {path: tradeoff, where: {carbon_cut_pct: 0.0}, field: cost}}
+              - {path: tradeoff, where: {carbon_cut_pct: 5.0}, field: carbon_t, op: lt,
+                 value_from: {path: tradeoff, where: {carbon_cut_pct: 0.0}, field: carbon_t}}
+            - - {path: answer_type, op: eq, value: infeasible}
+              - {path: summary, op: contains,
+                 value_from: {path: tradeoff, where: {feasible: true}, field: carbon_cut_pct, agg: max, format: pct}}
   - {id: replan-01, request: "Plant B loses 30% capacity. Re-plan.", expect: [scenario, infeasible]}
   - {id: replan-02, request: "Plant A is down 50% next week, re-plan the orders", expect: [scenario, infeasible]}
   - {id: replan-03, request: "Re-plan with the scenario", expect: [scenario, infeasible],

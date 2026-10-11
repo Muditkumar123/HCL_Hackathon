@@ -13,6 +13,11 @@ Without --in-process the cases go to a running API (API_URL, default http://loca
 Each run writes eval/results_<label>.json. A case passes when the response is HTTP 200 and a valid
 AnalyzeResponse, its answer_type is expected, every condition holds, and two rules from CLAUDE.md hold:
 a plan that is shown is valid, and the text is never unfaithful. Conditions fail closed and are never eval'd.
+
+Two extensions to EVAL-FORMAT.md (proposed to the auditor in .coordination/reviews/EVAL-NOTES.md):
+  * `value_from: {path, where?, field?, agg?: max|min, format?: pct}` instead of `value`: the expected value is
+    read from the same response (for example "cost at 10% > cost at 0%").
+  * `any_of: [[cond, ...], [cond, ...]]`: passes when every condition in at least one branch passes.
 """
 
 from __future__ import annotations
@@ -96,9 +101,50 @@ def _apply_op(op: str, val: Any, want: Any) -> bool | None:
         return False
 
 
+FORMATS = {"pct": lambda v: f"{v:g}%"}   # same formatting as ai/graph.py facts (e.g. deepest_feasible_cut)
+
+
+def resolve_value(spec: dict, doc: dict) -> tuple[Any, str]:
+    """The value a `value_from` spec points at, or (_MISSING, reason). Same fail-closed rules as conditions."""
+    val = resolve(doc, spec.get("path", "?"))
+    if val is _MISSING:
+        return _MISSING, f"value_from {spec.get('path')}: path missing"
+    if "where" in spec:
+        if not isinstance(val, list):
+            return _MISSING, "value_from: `where` needs a list"
+        val = [i for i in val if _matches(i, spec["where"])]
+        if "field" in spec:
+            vals = [i[spec["field"]] for i in val if spec["field"] in i]
+            if spec.get("agg") in ("max", "min"):
+                if not vals:
+                    return _MISSING, "value_from: no rows to aggregate"
+                val = max(vals) if spec["agg"] == "max" else min(vals)
+            elif len(val) != 1 or len(vals) != 1:
+                return _MISSING, f"value_from: expected exactly 1 matching row, got {len(val)}"
+            else:
+                val = vals[0]
+    if "format" in spec:
+        if spec["format"] not in FORMATS:
+            return _MISSING, f"value_from: unknown format {spec['format']!r}"
+        val = FORMATS[spec["format"]](val)
+    return val, ""
+
+
 def check_condition(cond: dict, doc: dict, others: dict[str, dict]) -> tuple[bool, str]:
     """Evaluate one condition against `doc` = {**response, baseline: {...}, trace: {...}}. Returns (ok, detail)."""
+    if "any_of" in cond:
+        branches = [[check_condition(c, doc, others) for c in branch] for branch in cond["any_of"]]
+        if not branches:
+            return False, "any_of: no branches"
+        if any(all(ok for ok, _ in b) for b in branches):
+            return True, "any_of: a branch passed"
+        why = " | ".join("; ".join(d for ok, d in b if not ok) for b in branches)
+        return False, f"any_of: no branch passed ({why})"
     path, op, want = cond.get("path", "?"), cond.get("op"), cond.get("value")
+    if "value_from" in cond:
+        want, err = resolve_value(cond["value_from"], doc)
+        if want is _MISSING:
+            return False, f"{path}: {err}"
     label = path + (f"[{cond['where']}]" if "where" in cond else "") + (f".{cond['field']}" if "field" in cond else "")
     if "compare_case" in cond:
         other = others.get(cond["compare_case"])

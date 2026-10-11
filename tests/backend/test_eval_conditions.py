@@ -56,3 +56,51 @@ def test_both_case_formats_load():
     assert c["expect"] == ["refused"] and len(c["conditions"]) == 1
     assert len(load_cases(SUITES["team"][1])) == 24
     assert len(load_cases(SUITES["auditor"][1])) >= 20
+
+
+TRADE = {
+    "answer_type": "infeasible",
+    "summary": "A 10% carbon cut is not feasible; the deepest feasible cut is 5.4%.",
+    "tradeoff": [{"carbon_cut_pct": 0.0, "cost": 100.0, "carbon_t": 20.0, "feasible": True},
+                 {"carbon_cut_pct": 5.0, "cost": 104.0, "carbon_t": 19.0, "feasible": True},
+                 {"carbon_cut_pct": 5.4, "cost": 104.0, "carbon_t": 18.9, "feasible": True},
+                 {"carbon_cut_pct": 10.0, "cost": 0.0, "carbon_t": 18.0, "feasible": False}],
+}
+
+
+def _cut_rule(cut: float) -> dict:
+    zero = {"path": "tradeoff", "where": {"carbon_cut_pct": 0.0}}
+    row = {"path": "tradeoff", "where": {"carbon_cut_pct": cut}}
+    return {"any_of": [
+        [{**row, "field": "feasible", "op": "eq", "value": True},
+         {**row, "field": "cost", "op": "gt", "value_from": {**zero, "field": "cost"}},
+         {**row, "field": "carbon_t", "op": "lt", "value_from": {**zero, "field": "carbon_t"}}],
+        [{"path": "answer_type", "op": "eq", "value": "infeasible"},
+         {"path": "summary", "op": "contains", "value_from": {"path": "tradeoff", "where": {"feasible": True},
+                                                              "field": "carbon_cut_pct", "agg": "max",
+                                                              "format": "pct"}}],
+    ]}
+
+
+def test_any_of_carbon_cut_rule():
+    assert check_condition(_cut_rule(5.0), TRADE, {})[0]               # feasible branch: costs more, emits less
+    assert check_condition(_cut_rule(10.0), TRADE, {})[0]              # infeasible branch quotes "5.4%"
+    wrong = {**TRADE, "summary": "A 10% carbon cut is not feasible."}
+    ok, detail = check_condition(_cut_rule(10.0), wrong, {})
+    assert not ok and "no branch passed" in detail
+    cheaper = {**TRADE, "answer_type": "scenario",
+               "tradeoff": [TRADE["tradeoff"][0], {**TRADE["tradeoff"][1], "cost": 99.0}]}
+    assert not check_condition(_cut_rule(5.0), cheaper, {})[0]         # a "cut" that is cheaper is suspicious
+
+
+def test_value_from_fails_closed():
+    assert not check_condition({"path": "summary", "op": "contains",
+                                "value_from": {"path": "tradeoff", "where": {"carbon_cut_pct": 99.0},
+                                               "field": "cost"}}, TRADE, {})[0]
+    assert not check_condition({"path": "summary", "op": "contains",
+                                "value_from": {"path": "nope", "field": "x"}}, TRADE, {})[0]
+    assert not check_condition({"path": "summary", "op": "contains",
+                                "value_from": {"path": "tradeoff", "where": {"feasible": True},
+                                               "field": "carbon_cut_pct", "agg": "max", "format": "{}"}},
+                               TRADE, {})[0]
+    assert not check_condition({"any_of": []}, TRADE, {})[0]
