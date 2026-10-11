@@ -8,9 +8,10 @@ landed cost, a carbon footprint and an arrival date, all computed from the data 
 weighted sum of cost, carbon and lateness. A separate validator re-checks the chosen plan from the raw tables before
 anyone sees it.
 
-Numbers marked **[pack]** come from the current data pack: `data/raw`, `data_version e543801d` (120 orders, 6
-products, 10 destinations, 5 plants, 4 production weeks from 12 Oct 2026, capacity events E-1 and E-2). They change
-when the data changes. Everything else is a property of the model.
+Numbers marked **[pack]** come from the frozen data pack **v2**: `data/raw`, `data_version 006f981d`
+(`generate_data --seed 42`; 120 orders, 6 products, 10 destinations, 5 plants, 4 production weeks from 12 Oct 2026,
+capacity events E-1 and E-2). Numbers marked **[v1]** come from the earlier, tighter pack v1 and explain design
+decisions. Everything else is a property of the model.
 
 ---
 
@@ -70,14 +71,14 @@ Orders are not split: one order, one plant, one week.
   0.7/0.3 (the default) really is "cost matters about twice as much as carbon", whatever the units. The trade-off
   table reports the implied carbon price, so management sees the default's meaning in money per tonne.
 - **Lateness dominates.** One late order-day costs 0.01, which is 1% of the normalised cost term at weight 1.
-  **[pack]** That is about 3,800 of money per late day (C_ref = 266,355; weight 0.7). An average order costs about
-  2,400 in total, so the plan never makes an order late to save money on it.
+  **[pack]** That is about 3,850 of money per late day (C_ref = 269,200; weight 0.7). An average order costs about
+  2,600 in total, so the plan never makes an order late to save money on it.
 - **Deferral penalty, and why it changed.** The first version charged a flat 1,000 per deferred order (a "big-M").
   That equals about 100,000 late order-days, so the solver would make dozens of orders late just to squeeze one more
-  order into the horizon. Shivang's eval caught it: "Plant B loses 30%" pushed late orders from 12 to 67. Now
+  order into the horizon. Shivang's eval caught it: **[v1]** "Plant B loses 30%" pushed late orders from 12 to 67. Now
   `defer[o]` = o's worst option inside the horizon + one more week of lateness + 0.05 (about 5 late days). Deferring is
   always worse than producing late, but only by about what it really means: the order ships at least a week later.
-  The same "B loses 30%" re-plan now has **[pack]** 22 late orders and 1 deferral.
+  The same "B loses 30%" re-plan then had **[v1]** 22 late orders and 1 deferral; on **[pack]** it has none.
 - **Minimal change.** When re-planning, every order moved off its old plant costs 0.0001, so 100 moves weigh as much
   as one late day. It only breaks near-ties in favour of a stable plan; it never buys stability with lateness. The
   "why" counterfactual uses 0.01 per move instead (section 7).
@@ -91,17 +92,18 @@ Orders are not split: one order, one plant, one week.
 | MIP gap | 0.5% | stop once within 0.5% of the proven optimum |
 | Time limit | 10 s main plan; 3 s per trade-off point and per counterfactual | latency targets: plan < 3 s, trade-off < 10 s |
 | Warm start | greedy plan: forced orders, then old-plan placements that still fit, then the rest at their best option that fits | gives SCIP a good plan at once |
-| Large models (> 600 options) | stop after SCIP's root node, then local search | measured: full branch-and-bound did not beat the root node in 20 s **[pack]** |
+| Large models (> 600 options) | stop after SCIP's root node, then local search | measured: full branch-and-bound did not beat the root node in 20 s **[v1]** |
 | Portfolio | 2 warm starts (by due date, largest order first), 5 when re-planning (+ keep old placements, + two that ignore the old plan), run in parallel threads; keep the best | a re-plan seeded only from the old plan got stuck next to it |
-| Local search | relocate one order; or move an order into a full slot by ejecting another order to its best free option (or deferring it). Only strictly improving moves; respects capacity, forced orders and the carbon cap | packing at 89% utilisation is where MIP heuristics stall |
+| Local search | relocate one order; or move an order into a full slot by ejecting another order to its best free option (or deferring it). Only strictly improving moves; respects capacity, forced orders and the carbon cap | tight packing (89% utilisation **[v1]**) is where MIP heuristics stall |
 | Memoisation | results cached on (table contents hash, arguments) | the graph and the trade-off ask for the same base plan |
 
 Everything is **deterministic**: the root-node stop is a node limit, not a clock, so the same request gives the same
 plan. When the plan isn't proven optimal, status is `FEASIBLE` and `notes` says how far it can be from the optimum,
-e.g. **[pack]** "within 3.1% of the solver's proven lower bound". The validator checks every plan independently.
+e.g. **[pack]** "within 0.4% of the solver's proven lower bound". The validator checks every plan independently.
 
-**[pack]** Why it is hard: 18,464 units of demand for 20,830 units of capacity (89%) in 4 weeks, orders of 50–300
-units into 28 capacity slots, with due dates. That is bin packing.
+Why it can be hard: orders of 50–300 units go into 28 capacity slots, with due dates. That is bin packing. On
+**[v1]** (18,464 units for 20,830 capacity, 89%) this needed every trick above; **[pack]** has 27,590 units of
+capacity (67% used), so the main plan is within 0.4% of optimal in 1.3 s, and the hard cases are deep carbon cuts.
 
 ## 6. Trade-off frontier (`scenarios.tradeoff_frontier`)
 
@@ -110,7 +112,7 @@ for each cut *c*.
 
 1. A minimum-carbon plan (carbon only; lateness allowed; no extra deferrals) estimates the deepest achievable cut.
 2. All requested cuts, plus that deepest cut, are solved **in parallel**, warm-started from the minimum-carbon plan
-   (3 s each). **[pack]** 6.2 s in total.
+   (3 s each). **[pack]** 5.7 s in total.
 3. Each point keeps the best plan among its own solve and every deeper feasible one, so the curve is monotone.
 4. The **deepest feasible cut is always an explicit point** (the feasible point with the largest cut). Every cut
    beyond it has `feasible=False`, so the answer can be "a 10% cut isn't achievable within capacity; the best is
@@ -140,61 +142,73 @@ never hidden).
 
 ## 9. Headline numbers [pack]
 
-Default weights (cost 0.7, carbon 0.3, lateness 1.0).
+Frozen pack v2 (`data_version 006f981d`), default weights (cost 0.7, carbon 0.3, lateness 1.0).
 
 | | Optimised plan | Naive "cheapest plant" plan |
 |---|---|---|
-| Total cost | 285,583 | 266,355 |
-| Carbon | 19.8 t | 24.4 t |
-| Late orders | **9** (13 late order-days) | **88** |
-| Capacity | all plant-weeks within capacity | **3 overloaded slots**: A wk 2 Nov 13,469 vs 1,275 units; B/P2 wk 12 Oct 2,274 vs 800; D wk 19 Oct 2,259 vs 900 |
-| Validator | capacity ok, eligibility ok | fails capacity |
+| Total cost | 311,029 | 269,200 |
+| Carbon | 12.9 t | 24.3 t |
+| Late orders | **0** | **85** |
+| Capacity | all plant-weeks within capacity | **3 overloaded slots**: A wk 2 Nov 13,579 vs 1,275 units; B/P2 wk 12 Oct 2,274 vs 1,040; B/P5 wk 12 Oct 1,992 vs 650 |
+| Validator | capacity, eligibility and delivery ok | fails capacity and delivery |
+| Solve | 1.3 s, within 0.4% of the proven lower bound | |
 
-The naive plan looks about 19,000 cheaper only because it isn't a real plan: it ignores capacity and due dates.
+The naive plan looks about 41,800 cheaper only because it isn't a real plan: it ignores capacity and due dates,
+and emits almost twice the carbon.
 
-- **58% of orders are NOT at their cheapest eligible plant** (70 of 120). For those, "it was the cheapest option"
-  would be a wrong explanation; that is why "why" answers re-solve the whole plan. (59% in the earlier run of the
-  same pack; the plan improved when the warm-start portfolio was added.)
-- **Carbon: the deepest achievable cut is 5.4%** (19.8 → 18.7 t) at +4,003 cost and 49 late orders: an implied
-  **3,727 per tonne** (money only). 10% or more is not achievable within this pack's capacity. An earlier search
-  found only 3.8% at 8,496 per tonne; the better search found a deeper, cheaper cut, so these are "best found"
-  figures (lower bounds on what is achievable), not proven limits.
-- **Speed:** main plan 1.4 s, trade-off frontier 6.2 s, re-plan 3.9 s, "why" for 3 alternative plants 2.3 s.
-- **"Plant B loses 30%" for all 4 weeks:** 9 → 22 late orders, 1 deferred, 32 plant changes, cost 285,583 →
-  282,841, validator ok. The loss takes 2,160 units out of a pack that only had 2,366 spare, so lateness rises.
-- **Late-drop drill** (E-3: Plant E −50%, 12–25 Oct; a dry run, not the real drop): 9 → 19 late, cost −1,682,
-  carbon +0.4 t. Cost can fall when capacity is lost: some orders that are now late anyway no longer pay for an
-  expensive on-time route. A 30 s full search does no better (22 late orders).
+- **75% of orders are NOT at their cheapest eligible plant** (90 of 120). For those, "it was the cheapest option"
+  would be a wrong explanation; that is why "why" answers re-solve the whole plan.
+- **Carbon trade-off** (5.7 s for the whole table):
+
+  | Cut | Cost | Δ cost | Late orders | Implied price per tonne |
+  |---|---|---|---|---|
+  | 0% | 311,029 | | 0 | |
+  | 5% | 314,923 | +3,894 | 6 | 5,610 |
+  | 10% | 317,829 | +6,800 | 13 | 5,143 |
+  | **14.5% (deepest)** | 317,984 | +6,955 | 49 | 3,708 |
+  | 15%, 20%, 30% | not achievable within capacity | | | |
+
+  The implied price counts money only; deeper cuts also cost on-time delivery. 14.5% is the deepest cut found. A
+  60 s minimum-carbon search reaches the same 14.5% and is within 1.0% of its proven lower bound, so no plan without
+  deferred orders cuts more than about 15.3%.
+- **Speed:** main plan 1.3 s, trade-off table 5.7 s, re-plan 1.9 s, "why" for 3 alternative plants 1.2 s.
+- **"Plant B loses 30%" for all 4 weeks** (2,808 units lost): still **0 late orders**, 24 plant changes, cost
+  311,029 → 309,930, validator ok. The re-plan is proven optimal; the base plan was within 0.4%, which is why cost
+  can come out slightly lower.
+- **Late-drop drill** (E-3: Plant E −50%, 12–25 Oct; a dry run, not the real drop): 0 → 0 late, cost −4,421,
+  carbon +1.5 t. E is a green-tariff plant, so losing it moves orders to cheaper, dirtier plants: the plan gets
+  cheaper and less green.
+- **[v1]** for comparison: at 89% utilisation the same model gave 9 late orders, a deepest cut of 5.4%, and
+  "B loses 30%" meant 22 late orders.
 
 ## 10. Likely judge questions
 
 **Q1. Why a MIP and not a greedy rule or an LLM?** Every order competes for the same plant-weeks, so the best plant
-for one order depends on all the others. The naive cheapest-plant rule produces 88 late orders and puts 13,469 units
+for one order depends on all the others. The naive cheapest-plant rule produces 85 late orders and puts 13,579 units
 into a week that holds 1,275 **[pack]**. A MIP sees all orders at once, guarantees capacity and eligibility by
 construction, and tells us how far from optimal it can be. The LLM only reads the request and writes the
 explanation; it never produces a number.
 
-**Q2. Your plan says FEASIBLE, not OPTIMAL. Is it any good?** Yes, and we say how good. SCIP proves a lower bound;
-the plan is **[pack]** within 3.1% of it on the weighted objective. A 30 s full search improves the main plan by
-only about 1% (8 instead of 9 late orders). We trade that last 1% for a deterministic answer in about 1.5 s, and
-the validator checks every plan independently.
+**Q2. Your plan says FEASIBLE, not OPTIMAL. Is it any good?** Yes, and we say how good. SCIP proves a lower bound,
+and the plan is within 0.4% of it **[pack]**. On large models we stop after SCIP's first (root) node and polish with
+local search, because on the tighter pack v1 a full 20 s search did not beat that. The answer is deterministic and
+arrives in about 1.3 s, and the validator checks every plan independently.
 
 **Q3. How did you choose the weights, and what does 0.7/0.3 mean?** Cost and carbon are normalised so each term is
-about 1.0, which makes the weights a real 70/30 preference. The trade-off table turns that into money: here a 5%
-carbon cut has an implied price of about 3,727 per tonne **[pack]**. Lateness is set so that one late day
-(about 3,800) outweighs the whole cost of an average order (about 2,400). Users can change all three weights per
-request.
+about 1.0, which makes the weights a real 70/30 preference. The trade-off table turns that into money: here a 10%
+carbon cut costs about 6,800, or 5,143 per tonne, and makes 13 orders late **[pack]**. Lateness is set so that one
+late day (about 3,850) outweighs the whole cost of an average order (about 2,600). Users can change all three
+weights per request.
 
 **Q4. "Plant B loses 30%": why do some orders move that were never at Plant B?** Capacity is shared: when B's orders
-move to A or D, they take slots other orders used, and those orders move in turn. Each change carries a code-built
-reason, for example **[pack]** "O-014: Plant B loses 30% capacity. Plant B load in week 2026-10-26: 1,931 -> 1,330
-units. Order cost -226, carbon +162 kg." The re-plan prefers the old placements (every move costs a little), so only
-necessary moves happen. Our test checks that a re-plan is never worse, in cost
-or in late order-days, than simply deferring the orders the loss forces off.
+move to other plants, they take slots other orders used, and those orders move in turn. Each change carries a code-built
+reason, for example **[pack]** "O-018: Plant B loses 30% capacity. Plant B load in week 2026-10-12: 2,573 -> 1,815
+units. Order cost +1,210, carbon -130 kg." The re-plan prefers the old placements (every move costs a little), so
+only necessary moves happen. Our test checks that a re-plan is never worse, in cost or in late order-days, than
+simply deferring the orders the loss forces off.
 
 **Q5. How do you explain why an order went to a plant, honestly?** We don't compare per-order costs, because in a
-capacity-limited plan that is often wrong: 58% of orders aren't at their cheapest plant **[pack]**. We force the
+capacity-limited plan that is often wrong: 75% of orders aren't at their cheapest plant **[pack]**. We force the
 order to each alternative and re-solve the whole plan (a counterfactual). The answer is concrete: **[pack]** "Plant A
-would be 287 cheaper for O-001, but it can't deliver O-001 on time, and two other orders (O-110, O-112) would also
-become late". Every number comes
+would be 409 cheaper for O-001, but it ships to the US in 24+ days, so O-001 would arrive late". Every number comes
 from that re-solve.
