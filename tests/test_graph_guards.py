@@ -322,7 +322,7 @@ def test_frontend_payload_and_chart():
                            kpis=plan.kpis, tradeoff=[TradeoffPoint(carbon_cut_pct=c, cost=100 + c, carbon_t=10 - c,
                                                                    late_orders=0, feasible=c < 30) for c in (0, 10, 30)])
     fig = tradeoff_figure(resp)
-    assert [t.name for t in fig.data] == ["Feasible", "Not feasible", "Chosen plan"]
+    assert [t.name for t in fig.data] == ["Feasible", "No feasible plan found (time limit)", "Chosen plan"]
     assert fig.data[2].x[0] == plan.kpis.total_carbon_t
     df = allocation_frame(resp)
     assert "rgba(220" in style_late_rows(df).to_html()            # the late row is shaded red
@@ -560,7 +560,7 @@ def _tradeoff_deps(cut_feasible: bool) -> tuple[Deps, dict]:
 def test_review1_infeasible_cut_has_no_sentinel_cost(ds):
     deps, _ = _tradeoff_deps(cut_feasible=False)
     resp, _ = ask(ds, "What does a 30% carbon cut cost?", deps)
-    assert "-19,100" not in resp.summary and "not feasible" in resp.summary
+    assert "-19,100" not in resp.summary and "no feasible plan found within the time limit" in resp.summary
     assert resp.answer_type == AnswerType.INFEASIBLE
 
 
@@ -692,7 +692,7 @@ def test_g4_rejects_on_time_claim_with_late_orders(text):
 
 
 @pytest.mark.parametrize("text", ["No on-time plan exists: 10 orders are late (O-014 and O-018 among them).",
-                                  "An all-on-time plan is not possible; 10 orders are late.",
+                                  "No all-on-time plan was found within the time limit; 10 orders are late.",
                                   "10 orders cannot be delivered on time."])
 def test_g4_allows_negated_on_time(text):
     assert _g4(text, LATE_FACTS)
@@ -858,3 +858,70 @@ def test_zero_argument_base_plan_still_supported(ds):
     deps.base_plan = lambda: None                    # tests/tools/test_scenarios.py uses this form
     resp, _ = ask(ds, "Why was order 77 built in Plant C?", deps)
     assert resp.answer_type == AnswerType.SCENARIO
+
+
+# =============================================================================================================
+# REVIEW-002 regressions (exact Codex inputs)
+# =============================================================================================================
+@pytest.mark.parametrize("text,parsed,check", [
+    ("Allocate orders; they do not have to be on time.", _PI(intent=_Intent.ALLOCATE, require_all_on_time=True),
+     lambda w, kw: kw["require_all_on_time"] is False),
+    ("Allocate orders and show the objective weights being used.",
+     _PI(intent=_Intent.ALLOCATE, weights_override=Weights(cost=0, carbon=1)),
+     lambda w, kw: (w.cost, w.carbon) == (0.7, 0.3)),
+    ("Allocate orders; do not use cost-only weighting.",
+     _PI(intent=_Intent.ALLOCATE, weights_override=Weights(cost=1, carbon=0)),
+     lambda w, kw: (w.cost, w.carbon) == (0.7, 0.3)),
+])
+def test_review2_g2_negation_and_mentions_do_not_set_controls(ds, text, parsed, check):
+    deps, rec = _llm_deps(parsed)
+    ask(ds, text, deps)
+    w, kw = rec["solve"][0]
+    assert check(w, kw)
+
+
+@pytest.mark.parametrize("text", ["Give me the cheapest plan that is on time", "Allocate orders with no late orders",
+                                  "Allocate orders, cost only, on time"])
+def test_review2_g2_positive_requests_still_set_controls(ds, text):
+    deps, rec = _llm_deps(_PI(intent=_Intent.ALLOCATE))
+    ask(ds, text, deps)
+    assert rec["solve"][0][1]["require_all_on_time"] is True
+
+
+TWO_LATE_FACTS = {"answer_type": "allocation", "kpis": {"total_cost": "19,100", "late_orders": 2,
+                                                         "unassigned_orders": 0,
+                                                         "plant_utilisation": {"A": "88%", "B": "40%"}},
+                  "late_order_ids": ["O-077", "O-112"], "unassigned_order_ids": []}
+
+
+@pytest.mark.parametrize("text", ["The schedule is punctual.", "Every delivery meets its promised date.",
+                                  "Plant B has room for every order.", "Send the entire portfolio to Plant B."])
+def test_review2_g4_rejects_synonym_claims(text):
+    assert not _g4(text, TWO_LATE_FACTS)
+
+
+def test_review2_g4_keeps_faithful_delivery_text():
+    assert _g4("Plan cost 19,100; O-077 and O-112 arrive after their due date. Plant A runs at 88%.", TWO_LATE_FACTS)
+
+
+# ---------------- infeasible-cut wording: "no feasible plan found within the time limit; best found X%"
+def test_review2_infeasible_cut_wording(ds):
+    deps, _ = _tradeoff_deps(cut_feasible=False)
+    resp, _ = ask(ds, "What does a 30% carbon cut cost?", deps)
+    assert "no feasible plan found within the time limit; best found 20%" in resp.summary
+    assert all("impossible" not in x.lower() and "not feasible" not in x.lower()
+               for x in [resp.summary, *resp.limitations])
+    from ai.generation.prompts import WRITER_SYSTEM
+    assert "no feasible plan found within the time limit" in WRITER_SYSTEM
+
+
+@pytest.mark.parametrize("text", ["A 30% carbon cut is impossible.", "That cut is not possible.",
+                                  "A deeper cut cannot be achieved.", "The 30% target is unachievable."])
+def test_review2_g4_rejects_unproven_impossible(text):
+    """The solver has a time limit: 'no feasible plan found' is all the facts support."""
+    assert not _g4(text, {"tradeoff_row": {"carbon_cut_pct": "30%", "feasible": False}})
+
+
+def test_review2_g4_allows_time_limit_wording():
+    facts = {"tradeoff_row": {"carbon_cut_pct": "30%", "feasible": False, "best_found": "20%"}}
+    assert _g4("For a 30% carbon cut: no feasible plan found within the time limit; best found 20%.", facts)

@@ -96,7 +96,7 @@ def tradeoff_figure(resp: AnalyzeResponse) -> go.Figure | None:
         return None
     pts = sorted(resp.tradeoff, key=lambda p: p.carbon_cut_pct)
     fig = go.Figure()
-    for feasible, name, symbol in ((True, "Feasible", "circle"), (False, "Not feasible", "x-open")):
+    for feasible, name, symbol in ((True, "Feasible", "circle"), (False, "No feasible plan found (time limit)", "x-open")):
         sel = [p for p in pts if p.feasible == feasible]
         if not sel:
             continue

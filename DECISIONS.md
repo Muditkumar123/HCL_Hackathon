@@ -44,3 +44,9 @@
   cut from the frontier's own point: if `plan` is attached it is validated and shown; if not, the answer is the
   point's numbers only (no allocation); if the point is infeasible the answer is `infeasible`. No separate solve.
 - Ask for Ayush: in `tradeoff_frontier`, attach the chosen `SolveResult` per point (`plan=...`).
+
+## D-008 Wording: "no feasible plan found within the time limit; best found X%" (REVIEW-002)
+- Why: the solver stops at a time limit, so a missing plan is not proof that none exists.
+- Rule: infeasible carbon cuts (facts, template, limitations, chart legend, writer prompt) say
+  "no feasible plan found within the time limit; best found X%". "Impossible", "not possible", "cannot be achieved"
+  are rejected by G4. Only data-proven facts use "cannot" (a plant that cannot make the product: eligibility).

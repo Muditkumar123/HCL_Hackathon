@@ -160,9 +160,19 @@ def input_guard(request: str) -> GuardVerdict:
 
 # ---------------------------------------------------------------- G2
 # the LLM may set these only when the user's words ask for them
-ON_TIME_RE = re.compile(r"(?<!not )(?<!n't )\b(?:on[- ]time|no late|without delays?)\b", re.IGNORECASE)
-COST_ONLY_RE = re.compile(r"\bcheapest\b|\bcost[- ]only\b", re.IGNORECASE)
-WEIGHTS_RE = re.compile(r"\bweight\w*|\bcheapest\b|\bcost[- ]only\b|\bgreenest\b", re.IGNORECASE)
+ON_TIME_RE = re.compile(r"\b(?:on[- ]time|no late|without delays?)\b", re.IGNORECASE)
+COST_ONLY_RE = re.compile(r"\bcheapest\b|\bcost[- ]only\b|\blowest[- ]cost\b", re.IGNORECASE)
+GREENEST_RE = re.compile(r"\bgreenest\b|\bcarbon[- ]only\b|\blowest[- ]carbon\b", re.IGNORECASE)
+NEGATION_RE = re.compile(r"\b(?:not|no need|never|without|nor|need not)\b|n't\b", re.IGNORECASE)
+
+
+def _asked(pattern: re.Pattern, text: str) -> bool:
+    """True if the pattern occurs as a request: not negated in the 5 words before it
+    ("they do not have to be on time", "do not use cost-only weighting" are not requests)."""
+    for m in pattern.finditer(text):
+        if not NEGATION_RE.search(" ".join(re.findall(r"[\w']+", text[:m.start()])[-5:])):
+            return True
+    return False
 PCT_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(?:%|percent\b|per\s?cent\b|pct\b)", re.IGNORECASE)
 ORDER_REF_RE = re.compile(r"\b(?:order\s*#?\s*|o-?)(\d+)\b", re.IGNORECASE)
 PLANT_REF_RE = re.compile(r"\bplants?\s+([a-z0-9][\w-]{0,9})\b", re.IGNORECASE)
@@ -221,28 +231,36 @@ def _ground(intent: ParsedIntent, request: str, notes: list[str]) -> None:
         if _digits(oid) not in orders or plant.upper() not in plants_said:
             notes.append(f"dropped ungrounded forced move {_safe(oid)}->{_safe(plant)}")
             intent.force_assignments.pop(oid)
-    # objective flags must be asked for, or a plain "allocate" silently ignores the user's weights
-    if intent.require_all_on_time and not ON_TIME_RE.search(request):
+
+
+def _weights_written(w: Weights, request: str) -> bool:
+    """An LLM weights_override survives only if both its numbers are written in the request (30/70, 0.3 and 0.7)."""
+    nums = {float(x) for x in re.findall(r"\d+(?:\.\d+)?", request)}
+    return {round(w.cost * 100, 4), round(w.carbon * 100, 4)} <= nums or {w.cost, w.carbon} <= nums
+
+
+def _objective_controls(intent: ParsedIntent, request: str, api_weights: Weights | None, notes: list[str]) -> None:
+    """The on-time flag and objective weights are derived by code from positive request wording (REVIEW-002 #1).
+    The LLM's values are never kept because a keyword occurs. Explicit API weights still win in the graph (D-005)."""
+    llm_on_time, llm_w = intent.require_all_on_time, intent.weights_override
+    intent.require_all_on_time = intent.intent == Intent.ALLOCATE and _asked(ON_TIME_RE, request)
+    if llm_on_time and not intent.require_all_on_time:
         notes.append("dropped ungrounded require_all_on_time (request does not ask for on-time delivery)")
-        intent.require_all_on_time = False
-    if intent.weights_override is not None and not WEIGHTS_RE.search(request):
-        w = intent.weights_override
-        notes.append(f"dropped ungrounded weights_override cost={w.cost:g} carbon={w.carbon:g} "
-                     "(request names no weights)")
-        intent.weights_override = None
-
-
-def _objective_from_words(intent: ParsedIntent, request: str, api_weights: Weights | None, notes: list[str]) -> None:
-    """'Cheapest plan that is on time' is set by code, not left to the LLM (qwen2.5 returned the weights but not
-    the on-time flag). Explicit API weights still win (D-005), so cost-only weights are set only without them."""
-    if ON_TIME_RE.search(request) and not intent.require_all_on_time:
-        intent.require_all_on_time = True
+    elif intent.require_all_on_time and not llm_on_time:
         notes.append("require_all_on_time set from the request wording")
-    if intent.require_all_on_time and COST_ONLY_RE.search(request) and api_weights is None:
-        w = intent.weights_override
-        if w is None or (w.cost, w.carbon) != (1.0, 0.0):
+    intent.weights_override = None
+    if intent.intent == Intent.ALLOCATE and api_weights is None:
+        if _asked(COST_ONLY_RE, request):
             intent.weights_override = Weights(cost=1, carbon=0)
-            notes.append("cost-only weights set from the request wording")
+        elif _asked(GREENEST_RE, request):
+            intent.weights_override = Weights(cost=0, carbon=1)
+    if intent.weights_override is None and llm_w is not None and _weights_written(llm_w, request):
+        intent.weights_override = llm_w
+    if llm_w is not None and intent.weights_override != llm_w:
+        notes.append(f"dropped ungrounded weights_override cost={llm_w.cost:g} carbon={llm_w.carbon:g} "
+                     "(not asked for in the request)")
+    if intent.weights_override is not None and intent.weights_override != llm_w:
+        notes.append("objective weights set from the request wording")
 
 
 def intent_guard(intent: ParsedIntent, request: str, ds: Dataset, scenario: Scenario | None = None,
@@ -264,8 +282,7 @@ def intent_guard(intent: ParsedIntent, request: str, ds: Dataset, scenario: Scen
     if intent.intent == Intent.CLARIFY:
         return GuardVerdict(False, AnswerType.CLARIFICATION_NEEDED, CLARIFY_MESSAGE, "router:clarify",
                             notes=notes), intent
-    if intent.intent == Intent.ALLOCATE:
-        _objective_from_words(intent, request, api_weights, notes)
+    _objective_controls(intent, request, api_weights, notes)
 
     plants = {p.upper(): p for p in ds.plants["plant"].astype(str)}
     for c in intent.capacity_changes:
@@ -454,13 +471,29 @@ def _entities(text: str) -> tuple[_Entities, str]:
 _RANK = (r"cheap\w*|expensive|costl\w*|pricier|priciest|green\w*|clean\w*|dirt\w*|lowest|highest|lower|higher"
          r"|least|most|best|worst|better|worse|efficien\w*|optimal|ideal|prefer\w*")
 _ACTION = r"mov\w*|shift\w*|reassign\w*|transfer\w*|relocat\w*|recommend\w*|should|suggest\w*|advis\w*"
-_CAPACITY = r"capacity|spare|plenty|unlimited|idle|headroom"
+_CAPACITY = (r"capacity|spare|plenty|unlimited|idle|headroom|room|space|free|availab\w*|absorb\w*|fit\w*"
+             r"|accommodat\w*|enough|handl\w*")
 CLAIM_RE = re.compile(rf"\b(?:{_RANK}|{_ACTION}|{_CAPACITY})\b", re.IGNORECASE)
 ACTION_RE = re.compile(rf"\b(?:{_ACTION})\b", re.IGNORECASE)
-EVERY_RE = re.compile(r"\b(?:every|all|each)\s+(?:the\s+)?orders?\b|\beverything\b", re.IGNORECASE)
+EVERY_RE = re.compile(r"\b(?:every|all|each|entire|whole|full)\s+(?:the\s+|of\s+the\s+)?(?:\w+\s+)?"
+                      r"(?:orders?|portfolio|volume|demand|production|backlog|book)\b|\beverything\b", re.IGNORECASE)
+# plan edits phrased as instructions ("Send the entire portfolio to Plant B") are never the LLM's to give
+EDIT_VERBS = (r"send|ship|move|put|place|assign|allocate|route|shift|switch|transfer|consolidate|concentrate|load"
+              r"|redirect|give|reassign|relocate")
+IMPERATIVE_RE = re.compile(rf"^\W*(?:please\s+)?(?:{EDIT_VERBS})\b", re.IGNORECASE)
+EDIT_RE = re.compile(rf"\b(?:{EDIT_VERBS})\w*\b", re.IGNORECASE)
 NO_LATE_RE = re.compile(
     r"\b(?:no|zero|none of the)\s+(?:\w+\s+){0,2}late\b|\bnothing (?:is|will be) late\b"
     r"|\b(?:all|every|each)\s+(?:\w+\s+){0,2}orders?\s+(?:\w+\s+){0,3}on[- ]time\b", re.IGNORECASE)
+# the solver has a time limit: "no feasible plan found" is supported, "impossible" is not
+UNPROVEN_RE = re.compile(r"\bimpossible\b|\bnot (?:be )?(?:possible|achievable|attainable)\b|\bunachievable\b"
+                         r"|\b(?:cannot|can't|could not|couldn't) be (?:achieved|attained|reached|met)\b", re.IGNORECASE)
+# positive delivery claims, per order (ids named) or plan-wide; checked against late/unassigned ids
+DELIVERY_CLAIM_RE = re.compile(
+    r"\bon[- ]time\b|\bpunctual\w*|\btimely\b|\bon schedule\b|\bwithout (?:any )?(?:delays?|lateness)\b"
+    r"|\bno delays?\b|\bmeets? (?:\w+ ){0,2}(?:promised|due|delivery|target|committed) dates?\b"
+    r"|\b(?:meets?|hits?|makes?) (?:\w+ ){0,2}deadlines?\b|\bdeliver\w* (?:\w+ ){0,3}(?:in|on) time\b"
+    r"|\barriv\w* (?:\w+ ){0,2}(?:before|by) (?:\w+ ){0,2}due\b", re.IGNORECASE)
 ON_TIME_CLAIM_RE = re.compile(
     r"\b(?:plan|schedule|allocation|everything|all (?:the )?orders|every order|each order|deliveries)\b"
     r"(?:\W+\w+){0,6}?\W+on[- ]time\b|\bon[- ]time (?:plan|schedule|allocation)\b|\bfully on[- ]time\b"
@@ -480,7 +513,7 @@ SENTENCE_RE = re.compile(r"(?<=[.!?;])\s+|\n+")
 CLAIM_ROOTS = ("mov", "shift", "reassign", "transfer", "relocat", "recommend", "should", "suggest", "advis", "cheap",
                "expens", "costl", "pric", "green", "clean", "dirt", "low", "high", "least", "most", "best", "worst",
                "better", "worse", "efficien", "optimal", "ideal", "prefer", "capacit", "spare", "plent", "unlimit",
-               "idle", "headroom")
+               "idle", "headroom", "room", "space", "free", "availab", "absorb", "fit", "accommodat", "enough", "handl")
 _PLANT_KEYS = {"plant", "from", "to", "chosen_plant", "alternative_plant", "from_plant", "to_plant"}
 
 
@@ -574,13 +607,34 @@ def _category_problems(sentence: str, ids: set[tuple[str | None, str]], f: _Fact
     return bad
 
 
-def _claim_problems(sentence: str, plants: set[str], f: _Facts) -> list[str]:
+def _delivery_claim(sentence: str) -> bool:
+    """A positive delivery claim: not negated in the 5 words before it, and not followed by 'not possible' etc."""
+    for m in DELIVERY_CLAIM_RE.finditer(sentence):
+        before = " ".join(re.findall(r"[\w']+", sentence[:m.start()])[-5:])
+        if not NEGATION_RE.search(before) and not re.search(r"\b(?:no|cannot|unable|impossible|fail\w*)\b", before,
+                                                             re.IGNORECASE) and not ON_TIME_NEGATED_RE.search(sentence):
+            return True
+    return False
+
+
+def _claim_problems(sentence: str, plants: set[str], f: _Facts,
+                    ids: set[tuple[str | None, str]] = frozenset()) -> list[str]:
     bad = []
-    on_time_claim = ON_TIME_CLAIM_RE.search(sentence) and not ON_TIME_NEGATED_RE.search(sentence)
-    if (NO_LATE_RE.search(sentence) or on_time_claim) and f.late != 0:
+    if _delivery_claim(sentence):
+        if ids:   # per-order: every named order must actually be on time
+            if any(_id_ok(i, f.late_ids | f.unassigned_ids) for i in ids):
+                bad.append(f"unsupported claim (order not on time): '{sentence[:80]}'")
+        elif f.late != 0:   # plan-wide, but FACTS has late or unassigned orders (or no KPIs)
+            bad.append(f"unsupported claim (late orders): '{sentence[:80]}'")
+    if NO_LATE_RE.search(sentence) and f.late != 0:
         bad.append(f"unsupported claim (late orders): '{sentence[:80]}'")
-    if ACTION_RE.search(sentence) and EVERY_RE.search(sentence):
-        bad.append(f"unsupported claim (plan-wide move): '{sentence[:80]}'")
+    if EVERY_RE.search(sentence) and (ACTION_RE.search(sentence) or EDIT_RE.search(sentence)
+                                      or re.search(rf"\b(?:{_CAPACITY})\b", sentence, re.IGNORECASE)):
+        bad.append(f"unsupported claim (plan-wide move or capacity): '{sentence[:80]}'")
+    if UNPROVEN_RE.search(sentence):
+        bad.append(f"unproven claim (say 'no feasible plan found within the time limit'): '{sentence[:80]}'")
+    if plants and IMPERATIVE_RE.search(sentence):
+        bad.append(f"unsupported claim (instruction to change the plan): '{sentence[:80]}'")
     roots = {_claim_root(m.group(0)) for m in CLAIM_RE.finditer(sentence)}
     if plants and roots and not any(plants <= rp and all(re.search(rf"\b{r}", rt) for r in roots)
                                     for rp, rt in f.records):
@@ -611,7 +665,7 @@ def check_faithfulness(text: str, facts: dict, request: str = "") -> tuple[bool,
         bad += [f"unknown id {(p or 'order ') + d}" for p, d in ents.ids if not _id_ok((p, d), f.ents.ids)]
         bad += [f"unknown plant {p}" for p in sorted(ents.plants - f.ents.plants)]
         bad += [f"unknown date {d}" for d in sorted(ents.dates - f.ents.dates)]
-        bad += _claim_problems(sentence, ents.plants, f)
+        bad += _claim_problems(sentence, ents.plants, f, ents.ids)
         bad += _category_problems(sentence, ents.ids, f)
     return (not bad), bad, checked
 
@@ -643,10 +697,9 @@ def template_summary(answer_type: AnswerType, facts: dict) -> str:
                      f"carbon change {facts.get('carbon_delta_t', 'n/a')}.")
     if r := facts.get("tradeoff_row"):
         if r.get("feasible") is False:
-            deepest = facts.get("deepest_feasible_cut")
-            parts.append(f"A {r['carbon_cut_pct']} carbon cut is not feasible within capacity and delivery rules"
-                         + (f"; the deepest feasible cut is {deepest}" if deepest else "")
-                         + ". The current plan is shown.")
+            best = facts.get("best_cut_found")
+            parts.append(f"For a {r['carbon_cut_pct']} carbon cut: no feasible plan found within the time limit"
+                         + (f"; best found {best}" if best else "") + ". The current plan is shown.")
         else:
             parts.append(f"A {r['carbon_cut_pct']} carbon cut changes total cost by {r['cost_delta']} to "
                          f"{r['cost']}, with {r['late_orders']} late orders.")

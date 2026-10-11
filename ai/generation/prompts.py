@@ -33,6 +33,9 @@ HARD RULES:
 5. Write every number as digits with its unit, copied from FACTS ("19,100", "3.2 t", "12%").
    Never spell numbers as words.
 6. Do not rank or compare plants, recommend moves, or describe spare capacity unless FACTS says so.
+7. If FACTS marks a carbon cut as not feasible, write "no feasible plan found within the time limit; best found X%"
+   with X from best_found. Never write "impossible", "cannot be achieved" or "not possible": the solver has a
+   time limit, so it has not proven that no plan exists.
 Plain, direct language. No jargon."""
 
 SUMMARY_USER = """REQUEST: {request}

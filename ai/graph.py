@@ -46,6 +46,8 @@ from shared.models import (
 
 log = logging.getLogger(__name__)
 MAX_WRITE_ATTEMPTS = 2
+# the solver has a time limit, so a missing plan is not proof that none exists: never say "impossible"
+NO_PLAN_FOUND = "no feasible plan found within the time limit"
 DEFAULT_CUTS = (0.0, 5.0, 10.0, 15.0, 20.0, 30.0)
 
 
@@ -261,8 +263,11 @@ def build_graph(deps: Deps):
             out.update(limitations=[f"The trade-off for a {cut:g}% carbon cut was not computed."])
             used = "not computed"
         elif not point.feasible:  # say so and keep the current plan as the closest valid plan
+            best = max((p.carbon_cut_pct for p in points if p.feasible), default=None)
             out.update(answer_type=AnswerType.INFEASIBLE, cut_infeasible=True,
-                       limitations=[f"A {cut:g}% carbon cut is not feasible; the current plan is shown."])
+                       limitations=[f"For a {cut:g}% carbon cut: {NO_PLAN_FOUND}"
+                                    + (f"; best found {best:g}%" if best is not None else "")
+                                    + ". The current plan is shown."])
             used = "infeasible"
         elif point.plan is not None and point.plan.kpis is not None:   # the frontier's plan, validated by the checker
             out.update(base=res, result=point.plan, changes=deps.compare(ds, res, point.plan))
@@ -442,7 +447,7 @@ def _tradeoff_facts(s: State) -> dict:
     rows = []
     for p in pts:
         if not p.feasible:
-            rows.append({"carbon_cut_pct": f"{p.carbon_cut_pct:g}%", "feasible": False})
+            rows.append({"carbon_cut_pct": f"{p.carbon_cut_pct:g}%", "feasible": False, "result": NO_PLAN_FOUND})
             continue
         rows.append({"carbon_cut_pct": f"{p.carbon_cut_pct:g}%", "feasible": True, "cost": money(p.cost),
                      "cost_delta": signed_money(p.cost - zero.cost) if zero else "n/a",
@@ -452,11 +457,12 @@ def _tradeoff_facts(s: State) -> dict:
     f: dict[str, Any] = {"tradeoff": rows}
     feasible_cuts = [p.carbon_cut_pct for p in pts if p.feasible]
     if feasible_cuts:
-        f["deepest_feasible_cut"] = f"{max(feasible_cuts):g}%"
+        f["best_cut_found"] = f"{max(feasible_cuts):g}%"
     if cut is None:
         return f
     if s.get("cut_infeasible"):
-        f["tradeoff_row"] = {"carbon_cut_pct": f"{cut:g}%", "feasible": False}
+        f["tradeoff_row"] = {"carbon_cut_pct": f"{cut:g}%", "feasible": False, "result": NO_PLAN_FOUND,
+                             "best_found": f.get("best_cut_found", "none")}
     elif s.get("base") is not None and s["base"].kpis and res.kpis:   # the cut's own validated plan
         b, k = s["base"].kpis, res.kpis
         f["tradeoff_row"] = {"carbon_cut_pct": f"{cut:g}%", "feasible": True, "cost": money(k.total_cost),
@@ -472,7 +478,9 @@ def _explain_sentence(oid: str, chosen: str | None, cfs: list[CounterfactualResu
     parts = [f"{oid} is in Plant {chosen}."]
     for c in cfs:
         if not c.feasible:
-            parts.append(f"Plant {c.alternative_plant} is not possible ({c.blocked_by}).")
+            parts.append(f"Plant {c.alternative_plant} cannot make this product (eligibility)."
+                         if c.blocked_by == "eligibility"   # proven by the data; capacity/delivery only by the solver
+                         else f"For Plant {c.alternative_plant}: {NO_PLAN_FOUND} ({c.blocked_by}).")
             continue
         local = "cheaper" if c.order_cost_delta < 0 else "more expensive"
         parts.append(
