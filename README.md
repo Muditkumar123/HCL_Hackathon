@@ -223,4 +223,27 @@ What it shows:
 
 ## Team contribution
 
+**Mudit Kumar (Orchestrator): LangGraph flow and guardrails (owner), plus UI and the shared contract**
+
+The LangGraph orchestration (`ai/graph.py`) and all guardrails (`ai/generation/guards.py`, G1 to G5) are Mudit's work.
+
+- Owned `shared/models.py`, the single data contract for every request, response, tool output and trace, and logged
+  each contract change in `DECISIONS.md` (D-001 to D-008).
+- Built the LangGraph flow in `ai/graph.py`: a fixed graph (input guard → intent parsing → intent guard → solver tools →
+  validator gate → writer → number check → finalize), with a bounded retry, a code-written fallback summary and a
+  full trace for every request. Plans are shown only after they pass `validate_plan`.
+- Wrote the guardrails in `ai/generation/guards.py`:
+  - G1 blocks prompt injection, rule-breaking and requests for invented numbers before any LLM call, and masks PII.
+  - G2 drops any solver setting the user did not state (plant, %, order, dates, weights, on-time) and derives the
+    on-time and cost-only settings in code.
+  - G4 checks every number, order, plant and claim in the LLM's text against the solver's facts, and rejects
+    unsupported claims ("on time", "impossible", late vs unassigned).
+- Wrote the intent router, prompts and writer (`ai/generation/`), the LLM wrapper `ai/llm.py` (Ollama, mock mode,
+  safe fallbacks), and development stubs for the solver tools behind `USE_TOOL_STUBS`.
+- Built the Streamlit UI (`frontend/app.py`): chat with example questions, KPI tiles, cost/carbon trade-off chart,
+  allocation table with late rows highlighted, what-moved and validator panels, trace viewer, CSV upload and
+  capacity-loss form.
+- Fixed every finding from the independent reviews REVIEW-001 and REVIEW-002, each with regression tests using the
+  reviewer's exact inputs (`tests/test_graph_guards.py`), and coordinated the team through the task files and queues.
+
 ## Declaration
