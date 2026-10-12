@@ -35,3 +35,6 @@ a pytest test for every key function, `ruff check` clean. Commit to Git every ho
 
 ## When you finish a task
 Write `DONE`, what you built, how to run it and anything blocking in your `.coordination/status/` file.
+
+## Commits
+Never add "Co-Authored-By: Claude" or "Generated with Claude Code" lines to commit messages. Commit as the human who owns the files.

@@ -1,0 +1,4 @@
+order_id,product,qty,destination,priority,customer
+O-001,P1,93,US,normal,C-18
+O-002,P1,140,US,normal,C-03
+O-003,P1,136,BR,high,C-12

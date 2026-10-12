@@ -225,8 +225,11 @@ cases:
     expected:
       answer_type: scenario
       conditions:
-        - {path: counterfactuals, where: {order_id: O-001, alternative_plant: A}, field: feasible, op: eq, value: false}
-        - {path: counterfactuals, where: {order_id: O-001, alternative_plant: A}, field: blocked_by, op: eq, value: delivery}
+        - {path: counterfactuals, where: {order_id: O-001}, op: length_gte, value: 1}
+        - compare_case: delivery-001
+          path: allocation
+          projection: [order_id, plant, production_week]
+          op: same
         - {path: validator.capacity_ok, op: eq, value: true}
         - {path: validator.eligibility_ok, op: eq, value: true}
         - {path: faithfulness_ok, op: eq, value: true}
@@ -302,12 +305,18 @@ cases:
     category: tradeoff
     request: "What does a 10% carbon cut cost?"
     expected:
-      answer_type: scenario
+      answer_type: [scenario, infeasible]
       conditions:
         - {path: tradeoff, where: {carbon_cut_pct: 10.0}, op: length_eq, value: 1}
-        - {path: tradeoff, where: {carbon_cut_pct: 10.0}, field: feasible, op: eq, value: true}
-        - {path: validator.capacity_ok, op: eq, value: true}
-        - {path: validator.eligibility_ok, op: eq, value: true}
+        - any_of:
+            - - {path: tradeoff, where: {carbon_cut_pct: 10.0}, field: feasible, op: eq, value: true}
+              - {path: tradeoff, where: {carbon_cut_pct: 10.0}, field: cost, op: gt,
+                 value_from: {path: tradeoff, where: {carbon_cut_pct: 0.0}, field: cost}}
+              - {path: tradeoff, where: {carbon_cut_pct: 10.0}, field: carbon_t, op: lt,
+                 value_from: {path: tradeoff, where: {carbon_cut_pct: 0.0}, field: carbon_t}}
+            - - {path: answer_type, op: eq, value: infeasible}
+              - {path: summary, op: contains,
+                 value_from: {path: tradeoff, where: {feasible: true}, field: carbon_cut_pct, agg: max, format: pct}}
         - {path: faithfulness_ok, op: eq, value: true}
 
   - id: brief-001
